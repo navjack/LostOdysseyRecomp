@@ -13,6 +13,7 @@
 #include <kernel/memory.h>
 #include <os/logger.h>
 #include <os/shader_log.h>
+#include <os/main_thread.h>
 #include <hid/hid.h>
 #include <debug/battle_menu.h>
 
@@ -451,6 +452,11 @@ namespace gpu::video
             return false;
         }
         LOG_INFO("video: render thread {}", GetCurrentThreadId());
+#elif defined(__APPLE__)
+        // Cocoa windows belong to the main thread, which serves this request.
+        bool created = false;
+        os::main_thread::RunSync([&] { created = createWindow(); });
+        if (!created) { Shutdown(); g_initAttempted = true; return false; }
 #else
         if (!createWindow()) { Shutdown(); g_initAttempted = true; return false; }
 #endif
@@ -520,6 +526,8 @@ namespace gpu::video
         g_nativeWindow = nullptr;
         g_preparationWindow = nullptr;
         g_shaderProgress = 0;
+#elif defined(__APPLE__)
+        os::main_thread::RunSync([] { DestroyWindowResources(); });
 #else
         DestroyWindowResources();
 #endif
@@ -530,7 +538,14 @@ namespace gpu::video
 
     void PumpEvents()
     {
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
+        PumpWindowEvents();
+#endif
+    }
+
+    void PumpMainThreadEvents()
+    {
+#ifdef __APPLE__
         PumpWindowEvents();
 #endif
     }

@@ -28,6 +28,8 @@
 #include "settings/restart.h"
 #include "updater/update.h"
 #include "version.h"
+#include <os/host_thread.h>
+#include <os/main_thread.h>
 
 #ifdef _WIN32
 #include <timeapi.h>
@@ -75,6 +77,7 @@ void InstallPhysicalWatchpoint();
 
 int main(int argc, char* argv[])
 {
+    os::main_thread::Initialize();
 #ifdef _WIN32
     // A restart child must park before touching logs, settings, profiles,
     // saves, caches, or guest state. Invalid handshake arguments fail closed.
@@ -298,7 +301,20 @@ int main(int argc, char* argv[])
         hid::Init(); // otherwise the video thread initialises it
 
     LOG_INFO("starting guest at {:#x}", entry);
+#ifdef __APPLE__
+    // Cocoa windows and events belong to the main thread, so the guest's main
+    // thread runs on a host thread while this thread serves window work.
+    std::atomic<bool> guestReturned{ false };
+    os::HostThread guestMain([&] {
+        GuestThread::Start({ entry, 0, 0 });
+        guestReturned = true;
+        os::main_thread::Wake();
+    });
+    os::main_thread::Run(guestReturned, [] { gpu::video::PumpMainThreadEvents(); });
+    guestMain.join();
+#else
     GuestThread::Start({ entry, 0, 0 });
+#endif
 
     LOG_INFO("guest main thread returned");
     return 0;

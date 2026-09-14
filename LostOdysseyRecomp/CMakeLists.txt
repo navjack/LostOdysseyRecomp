@@ -96,6 +96,10 @@ target_link_libraries(LostOdysseyRecomp PRIVATE
 if(UNIX)
     target_link_libraries(LostOdysseyRecomp PRIVATE pthread dl)
 endif()
+if(APPLE)
+    # os/main_thread.cpp serves the main run loop and dispatch queue.
+    target_link_libraries(LostOdysseyRecomp PRIVATE "-framework CoreFoundation")
+endif()
 target_link_libraries(LostOdysseyRecomp PRIVATE lo_avcodec)
 
 if(LO_BUILD_GPU)
@@ -584,6 +588,15 @@ if(WIN32 AND LO_BUILD_GPU)
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "${LO_DXC_BINARY_DIR}/${binary}" "$<TARGET_FILE_DIR:${target}>/${binary}" VERBATIM)
             endforeach()
+        endif()
+    endforeach()
+elseif(APPLE AND LO_BUILD_GPU)
+    set(LO_DXC_DYLIB "${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/dxc-bin/lib/arm64/libdxcompiler.dylib")
+    foreach(target LostOdysseyRecomp LoShaderTool)
+        if(TARGET ${target} AND EXISTS "${LO_DXC_DYLIB}")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${LO_DXC_DYLIB}" "$<TARGET_FILE_DIR:${target}>/libdxcompiler.dylib" VERBATIM)
         endif()
     endforeach()
 elseif(UNIX AND LO_BUILD_GPU)

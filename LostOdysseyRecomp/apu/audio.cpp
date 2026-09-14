@@ -13,7 +13,7 @@ namespace apu
         std::atomic<uint32_t> g_callback{ 0 };
         std::atomic<uint32_t> g_param{ 0 };
         std::atomic<uint32_t> g_framesSubmitted{ 0 };
-        std::thread g_thread;
+        os::HostThread g_thread; // runs the guest audio callback
         std::atomic<bool> g_running{ false };
         SDL_AudioDeviceID g_device = 0;
         constexpr uint32_t kStereoFrameBytes = XAUDIO_NUM_SAMPLES * 2 * sizeof(float);
@@ -104,7 +104,7 @@ namespace apu
         if (!g_device) LOG_WARNING("audio device unavailable: {}", SDL_GetError());
         else LOG_INFO("audio output: 48000 Hz stereo float, SDL driver {}", SDL_GetCurrentAudioDriver());
         g_running = true;
-        g_thread = std::thread(DriverMain);
+        g_thread = os::HostThread(DriverMain);
         g_thread.detach();
     }
 

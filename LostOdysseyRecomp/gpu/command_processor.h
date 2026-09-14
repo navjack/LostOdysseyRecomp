@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <thread>
+#include <os/host_thread.h>
 #include <vector>
 
 // Minimal Xenos command processor: consumes the primary ring buffer, executes
@@ -107,9 +108,11 @@ namespace gpu
         uint64_t m_binMask = 0xFFFFFFFFFFFFFFFFull;
         uint64_t m_binSelect = 0xFFFFFFFFFFFFFFFFull;
 
-        std::thread m_worker;
-        std::thread m_vsync;
-        std::thread m_interruptThread;
+        // Vsync and interrupt threads run guest callbacks; all three share one
+        // type so shutdown can join them together.
+        os::HostThread m_worker;
+        os::HostThread m_vsync;
+        os::HostThread m_interruptThread;
     };
 
     extern CommandProcessor g_commandProcessor;

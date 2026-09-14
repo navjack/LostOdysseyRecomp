@@ -12,6 +12,7 @@
 #include <kernel/function.h>
 #include <os/logger.h>
 #include <os/shader_log.h>
+#include <os/main_thread.h>
 #include <chrono>
 #include <kernel/io/file_system.h>
 #include <set>
@@ -228,7 +229,7 @@ namespace gpu
         // transaction has either committed, or explicitly entered headless mode.
         std::promise<bool> ready;
         auto initialized = ready.get_future();
-        m_worker = std::thread([this, ready = std::move(ready)]() mutable {
+        m_worker = os::HostThread([this, ready = std::move(ready)]() mutable {
             bool success = false;
             try { success = video::Init() || getenv("LO_HEADLESS") != nullptr; }
             catch (const std::exception& e) { LOG_ERROR("graphics startup failed: {}", e.what()); video::Shutdown(); }
@@ -236,14 +237,20 @@ namespace gpu
             ready.set_value(success);
             if (success) WorkerMain();
         });
+#ifdef __APPLE__
+        // video::Init forwards window work to the main thread, which is usually
+        // this thread; keep serving it while the worker starts the backend.
+        while (initialized.wait_for(std::chrono::milliseconds(1)) != std::future_status::ready)
+            os::main_thread::Drain(std::chrono::milliseconds(8));
+#endif
         if (!initialized.get()) {
             m_running = false;
             m_worker.join();
             return false;
         }
         try {
-            m_vsync = std::thread([this] { VsyncMain(); });
-            m_interruptThread = std::thread([this] { InterruptMain(); });
+            m_vsync = os::HostThread([this] { VsyncMain(); });
+            m_interruptThread = os::HostThread([this] { InterruptMain(); });
         } catch (const std::exception& e) {
             LOG_ERROR("graphics worker creation failed: {}", e.what());
             Shutdown();

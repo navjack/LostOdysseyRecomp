@@ -5,6 +5,10 @@
 
 int main()
 {
+    // 16 KiB-page hosts leave E unmapped (see UnmappedAliasRange); only check its
+    // one-page offset where the host can actually express it.
+    const auto unmapped = GuestAddressSpace::UnmappedAliasRange();
+    const bool eMapped = unmapped.begin == unmapped.end;
     // Repeat to exercise release and reuse, including the preferred host base.
     for (int iteration = 0; iteration < 2; ++iteration)
     {
@@ -27,17 +31,19 @@ int main()
             ok &= word(0xC0000000u + offset) == 0x12345678;
             word(0xC0000000u + offset) = 0;
             ok &= word(0xA0000000u + offset) == 0;
-            if (offset >= 0x1000)
+            if (eMapped && offset >= 0x1000)
             {
                 word(0xE0000000u + offset - 0x1000) = 0xABCDEF01;
                 ok &= word(0xA0000000u + offset) == 0xABCDEF01;
                 ok &= word(0xC0000000u + offset) == 0xABCDEF01;
             }
         }
-        // A virtual page must not accidentally alias the physical page.
-        word(0x1000) = 0x87654321;
-        word(0xA0001000) = 0xDEADBEEF;
-        ok &= word(0x1000) == 0x87654321;
+        // A virtual page must not accidentally alias the physical page. Use the
+        // first virtual allocator page (PageAllocator::Init): the guest null
+        // guard covers a whole host page, which is 16 KiB on Apple Silicon.
+        word(0x00100000) = 0x87654321;
+        word(0xA0100000) = 0xDEADBEEF;
+        ok &= word(0x00100000) == 0x87654321;
 
         // Occlusion-query round trip: CPU initializes through C, GPU writes
         // END through A, CPU subtracts BEGIN from END through C.
@@ -54,6 +60,8 @@ int main()
             return 1;
         }
     }
-    std::puts("PASS: A/C coherence, E offset, virtual isolation, query round trip, release/reallocate");
+    std::puts(eMapped
+        ? "PASS: A/C coherence, E offset, virtual isolation, query round trip, release/reallocate"
+        : "PASS: A/C coherence, virtual isolation, query round trip, release/reallocate (E unmapped on this host)");
     return 0;
 }

@@ -5,6 +5,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <memoryapi.h>
+#elif defined(__APPLE__)
+#include <cstdio>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #else
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -21,6 +26,17 @@ static constexpr size_t kOffsets[] = {0, 0xA0000000, 0xA0000000, 0xA0001000};
 static constinit FailureInfo failure{};
 
 FailureInfo GetFailureInfo() { return failure; }
+
+GuestRange UnmappedAliasRange()
+{
+#ifdef __APPLE__
+    // Mapping E one 4 KiB page past A would need two aliases of the same backing
+    // byte 0x3FFFF000 apart, which is not a multiple of the 16 KiB host page.
+    return {0xE0000000ull, 0x100000000ull};
+#else
+    return {};
+#endif
+}
 
 const char* FailureOperationName(FailureOperation operation)
 {
@@ -54,7 +70,11 @@ const char* FailureApiName(FailureOperation operation)
     case FailureOperation::ReservePreferred:
     case FailureOperation::ReserveAny:
     case FailureOperation::MapView: return "mmap";
+#ifdef __APPLE__
+    case FailureOperation::CreateBacking: return "shm_open";
+#else
     case FailureOperation::CreateBacking: return "memfd_create";
+#endif
     case FailureOperation::ResizeBacking: return "ftruncate";
     case FailureOperation::ProtectNull: return "mprotect";
 #endif
@@ -188,6 +208,54 @@ uint8_t* Allocate()
     {
         RecordFailure(FailureOperation::ProtectNull, GetLastError(), -1, base, 4096, 0, preferredError);
         Release(base);
+        return nullptr;
+    }
+#elif defined(__APPLE__)
+    // On arm64 macOS the main image and the dyld shared cache live inside
+    // 0x100000000..0x200000000, so let the kernel place the range. Recompiled
+    // code and the runtime address guest memory relative to base.
+    auto* base = static_cast<uint8_t*>(mmap(nullptr, kSize, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0));
+    if (base == MAP_FAILED)
+    {
+        RecordFailure(FailureOperation::ReserveAny, uint32_t(errno), -1, nullptr, kSize);
+        return nullptr;
+    }
+    // POSIX shared memory stands in for memfd; the name is unlinked immediately.
+    // Only A and C are backed, so E's extra tail page is not needed.
+    constexpr size_t kAppleBackingSize = 0xC0000000ull;
+    char name[32];
+    snprintf(name, sizeof(name), "/lo-guest-%d", int(getpid()));
+    int section = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (section < 0)
+    {
+        RecordFailure(FailureOperation::CreateBacking, uint32_t(errno), -1, nullptr, kAppleBackingSize);
+        munmap(base, kSize);
+        return nullptr;
+    }
+    shm_unlink(name);
+    bool success = ftruncate(section, kAppleBackingSize) == 0;
+    if (!success)
+        RecordFailure(FailureOperation::ResizeBacking, uint32_t(errno), -1, nullptr, kAppleBackingSize);
+    // Map virtual memory, A and C. E stays PROT_NONE (see UnmappedAliasRange) so
+    // any use faults visibly instead of reading the wrong physical page.
+    for (size_t i = 0; success && i < 3; ++i)
+    {
+        success = mmap(base + kStarts[i], kSizes[i], PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_FIXED, section, kOffsets[i]) != MAP_FAILED;
+        if (!success)
+            RecordFailure(FailureOperation::MapView, uint32_t(errno), int32_t(i),
+                          base + kStarts[i], kSizes[i], kOffsets[i]);
+    }
+    close(section);
+    // Rounds up to the 16 KiB host page; guest addresses that low are never mapped.
+    if (success && mprotect(base, 4096, PROT_NONE) != 0)
+    {
+        RecordFailure(FailureOperation::ProtectNull, uint32_t(errno), -1, base, 4096);
+        success = false;
+    }
+    if (!success)
+    {
+        munmap(base, kSize);
         return nullptr;
     }
 #else

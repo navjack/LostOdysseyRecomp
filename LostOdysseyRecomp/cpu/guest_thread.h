@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kernel/xdm.h>
+#include <os/host_thread.h>
 
 #define CURRENT_THREAD_HANDLE uint32_t(-2)
 
@@ -30,7 +31,7 @@ struct GuestThreadHandle : KernelObject
     GuestThreadParams params;
     std::atomic<bool> suspended;
     std::atomic<bool> finished{ false };
-    std::thread thread;
+    os::HostThread thread;
 
     GuestThreadHandle(const GuestThreadParams& params);
     ~GuestThreadHandle() override;

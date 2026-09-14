@@ -82,7 +82,12 @@ static uint32_t CalcThreadId(const ThreadType& id)
 
 uint32_t GuestThreadHandle::GetThreadId() const
 {
+#ifdef _WIN32
     return CalcThreadId(thread.get_id());
+#else
+    // POSIX guest threads are pthreads (os::HostThread); identify them by handle.
+    return CalcThreadId(thread.native_handle());
+#endif
 }
 
 uint32_t GuestThreadHandle::Wait(uint32_t timeout)
@@ -140,7 +145,11 @@ GuestThreadHandle* GuestThread::Start(const GuestThreadParams& params, uint32_t*
 
 uint32_t GuestThread::GetCurrentThreadId()
 {
+#ifdef _WIN32
     return CalcThreadId(std::this_thread::get_id());
+#else
+    return CalcThreadId(pthread_self());
+#endif
 }
 
 void GuestThread::SetLastError(uint32_t error)

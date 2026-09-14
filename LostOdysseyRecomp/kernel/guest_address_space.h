@@ -42,6 +42,14 @@ struct FailureInfo
     uintptr_t backingHandle;
     FailureMemoryStatus memory;
 };
+// Guest range [begin, end) left inaccessible because this host cannot alias it
+// exactly; empty when every view is mapped.
+struct GuestRange
+{
+    uint64_t begin;
+    uint64_t end;
+};
+GuestRange UnmappedAliasRange();
 FailureInfo GetFailureInfo();
 const char* FailureOperationName(FailureOperation operation);
 const char* FailureApiName(FailureOperation operation);

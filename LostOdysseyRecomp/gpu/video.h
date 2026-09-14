@@ -29,8 +29,11 @@ namespace gpu::video
     bool Init();
     void Shutdown();
 
-    // Drains messages on non-Windows hosts; Windows pumps on its window thread.
+    // Drains messages on Linux; Windows pumps on its window thread and macOS on
+    // the main thread (PumpMainThreadEvents).
     void PumpEvents();
+    // macOS main-thread idle work: window events, window mode and title updates.
+    void PumpMainThreadEvents();
     bool DisplayModeFailed();
     // Alt+Enter is session-only; saving Display settings takes precedence.
     bool WindowModeOverridden();

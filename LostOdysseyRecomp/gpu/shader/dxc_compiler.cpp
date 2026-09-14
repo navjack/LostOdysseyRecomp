@@ -91,8 +91,16 @@ namespace xenos
 #else
         void LoadDxc()
         {
+#ifdef __APPLE__
+            // The repository's macOS library is a universal (arm64 + x86_64) build.
+            constexpr const char* kLibraryName = "libdxcompiler.dylib";
+            constexpr const char* kRepositoryLibrary = "tools/XenosRecomp/thirdparty/dxc-bin/lib/arm64/libdxcompiler.dylib";
+#else
+            constexpr const char* kLibraryName = "libdxcompiler.so";
+            constexpr const char* kRepositoryLibrary = "tools/XenosRecomp/thirdparty/dxc-bin/lib/x64/libdxcompiler.so";
+#endif
             std::vector<std::filesystem::path> candidates;
-            candidates.push_back("libdxcompiler.so");
+            candidates.push_back(kLibraryName);
             if (const char* envPath = std::getenv("LO_DXC_PATH"); envPath && *envPath)
             {
                 candidates.push_back(envPath);
@@ -101,9 +109,9 @@ namespace xenos
             const auto cwd = std::filesystem::current_path(ec);
             if (!ec)
             {
-                candidates.push_back(cwd / "libdxcompiler.so");
+                candidates.push_back(cwd / kLibraryName);
             }
-            const std::filesystem::path relativeDxc = "tools/XenosRecomp/thirdparty/dxc-bin/lib/x64/libdxcompiler.so";
+            const std::filesystem::path relativeDxc = kRepositoryLibrary;
             if (std::filesystem::exists(relativeDxc, ec))
             {
                 candidates.push_back(relativeDxc);
