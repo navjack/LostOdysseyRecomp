@@ -5,19 +5,9 @@
 #include <kernel/memory.h>
 #include <version.h>
 
-#ifdef _WIN32
-#include <csignal>
-#include <exception>
-#include <dbghelp.h>
-#include <psapi.h>
-#pragma comment(lib, "dbghelp.lib")
-
 namespace
 {
-    // Cached before game threads start. No CRT environment access during a crash.
-    char g_dumpList[1024]{};
-    volatile LONG g_crashActive = 0;
-
+    // Fixed-buffer crash text: no allocation, formatting library or logger lock.
     struct CrashText
     {
         char data[2048];
@@ -49,6 +39,20 @@ namespace
             size = 0;
         }
     };
+}
+
+#ifdef _WIN32
+#include <csignal>
+#include <exception>
+#include <dbghelp.h>
+#include <psapi.h>
+#pragma comment(lib, "dbghelp.lib")
+
+namespace
+{
+    // Cached before game threads start. No CRT environment access during a crash.
+    char g_dumpList[1024]{};
+    volatile LONG g_crashActive = 0;
 
     const char* ExceptionName(DWORD code) noexcept
     {
@@ -370,5 +374,102 @@ void InstallCrashHandler()
     std::signal(SIGABRT, AbortHandler);
 }
 #else
-void InstallCrashHandler() {}
+#include <kernel/guest_address_space.h>
+#include <csignal>
+#include <exception>
+#include <execinfo.h>
+#include <unistd.h>
+
+namespace
+{
+    std::atomic<bool> g_crashActive{ false };
+
+    const char* SignalName(int sig) noexcept
+    {
+        switch (sig)
+        {
+        case SIGSEGV: return "SIGSEGV";
+        case SIGBUS: return "SIGBUS";
+        case SIGILL: return "SIGILL";
+        case SIGFPE: return "SIGFPE";
+        case SIGABRT: return "SIGABRT";
+        default: return "signal";
+        }
+    }
+
+    uintptr_t HostPc(void* context) noexcept
+    {
+#if defined(__APPLE__) && defined(__arm64__)
+        const auto* uc = static_cast<ucontext_t*>(context);
+        return uc && uc->uc_mcontext ? uintptr_t(uc->uc_mcontext->__ss.__pc) : 0;
+#else
+        (void)context;
+        return 0;
+#endif
+    }
+
+    void FaultHandler(int sig, siginfo_t* info, void* context) noexcept
+    {
+        if (g_crashActive.exchange(true))
+        {
+            constexpr char message[] = "\n[crash] secondary failure while reporting; terminating\n";
+            os::logger::EmergencyWrite(message, sizeof(message) - 1);
+            _exit(128 + sig);
+        }
+        const auto address = info ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+        CrashText text;
+        text.Text("\n[crash] ").Text(SignalName(sig)).Text(" code=").Decimal(info ? unsigned(info->si_code) : 0)
+            .Text(" address=0x").Hex(address, 16).Text(" pc=0x").Hex(HostPc(context), 16)
+            .Text(" version=").Text(lo_version::Source).Text("\n");
+        const auto base = reinterpret_cast<uintptr_t>(g_memory.base);
+        if (sig != SIGABRT && base && address >= base && address - base < PPC_MEMORY_SIZE)
+        {
+            const uint64_t guest = address - base;
+            const auto unmapped = GuestAddressSpace::UnmappedAliasRange();
+            text.Text("[crash] guest=0x").Hex(guest);
+            if (guest >= unmapped.begin && guest < unmapped.end)
+                text.Text(" is in the E physical alias, which this host leaves unmapped (16 KiB pages)");
+            text.Text("\n");
+        }
+        if (const auto* guest = GetPPCContext())
+        {
+            text.Text("[crash] guest lr=0x").Hex(guest->lr).Text(" ctr=0x").Hex(guest->ctr.u32)
+                .Text(" r1=0x").Hex(guest->r1.u32).Text(" r3=0x").Hex(guest->r3.u32)
+                .Text(" r13=0x").Hex(guest->r13.u32).Text("\n");
+        }
+        text.Write();
+        // Best effort: backtrace() is not strictly async-signal-safe.
+        void* frames[64];
+        const int count = backtrace(frames, 64);
+        backtrace_symbols_fd(frames, count, STDERR_FILENO);
+        // Re-raise with the default action so the system still writes its crash report.
+        struct sigaction action{};
+        action.sa_handler = SIG_DFL;
+        sigemptyset(&action.sa_mask);
+        sigaction(sig, &action, nullptr);
+        raise(sig);
+    }
+}
+
+void InstallCrashHandler()
+{
+    // An alternate stack lets this (main) thread report its own stack overflow.
+    static char alternateStack[64 * 1024];
+    stack_t stack{};
+    stack.ss_sp = alternateStack;
+    stack.ss_size = sizeof(alternateStack);
+    sigaltstack(&stack, nullptr);
+
+    struct sigaction action{};
+    action.sa_sigaction = FaultHandler;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    for (int sig : { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT })
+        sigaction(sig, &action, nullptr);
+    std::set_terminate([] {
+        constexpr char message[] = "\n[crash] std::terminate\n";
+        os::logger::EmergencyWrite(message, sizeof(message) - 1);
+        std::abort();
+    });
+}
 #endif
