@@ -27,11 +27,17 @@ Config Validate(Config value)
     if (!gpu::backend::Known(value.graphicsBackend))
 #ifdef _WIN32
         value.graphicsBackend = GraphicsBackend::D3D12;
+#elif defined(__APPLE__)
+        value.graphicsBackend = GraphicsBackend::Metal;
 #else
         value.graphicsBackend = GraphicsBackend::Vulkan;
 #endif
-#ifndef _WIN32
-    if (value.graphicsBackend == GraphicsBackend::D3D12 || value.graphicsBackend == GraphicsBackend::D3D11)
+#ifdef __APPLE__
+    // Metal is the only renderer on macOS.
+    value.graphicsBackend = GraphicsBackend::Metal;
+#elif !defined(_WIN32)
+    if (value.graphicsBackend == GraphicsBackend::D3D12 || value.graphicsBackend == GraphicsBackend::D3D11 ||
+        value.graphicsBackend == GraphicsBackend::Metal)
         value.graphicsBackend = GraphicsBackend::Vulkan;
 #endif
     if (value.width < 640 || value.width > 7680 || value.height < 480 || value.height > 4320)

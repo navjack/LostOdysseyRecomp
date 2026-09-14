@@ -38,10 +38,12 @@
 #ifdef LO_GPU_PLUME
 namespace plume
 {
-    // Defined in plume_d3d12.cpp / plume_vulkan.cpp but not exported by a header.
+    // Defined in plume_d3d12.cpp / plume_vulkan.cpp / plume_metal.cpp but not exported by a header.
 #ifdef _WIN32
     std::unique_ptr<RenderInterface> CreateD3D12Interface();
     std::unique_ptr<RenderInterface> CreateVulkanInterface();
+#elif defined(__APPLE__)
+    std::unique_ptr<RenderInterface> CreateMetalInterface();
 #else
     std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
 #endif
@@ -56,11 +58,21 @@ namespace gpu::video
         constexpr uint32_t kMaxHeight = 1080;
 
         SDL_Window* g_window = nullptr;
+#ifdef __APPLE__
+        // Created with the window on the main thread; its layer is the swapchain target.
+        SDL_MetalView g_metalView = nullptr;
+#ifdef LO_GPU_PLUME
+        plume::RenderWindow g_renderWindow{};
+#endif
+#endif
         bool g_videoSubsystemOwned = false;
         // Pair only this lifecycle's reference, on its window-owning thread.
         // HID or other SDL clients retain their independent subsystem references.
         void DestroyWindowResources()
         {
+#ifdef __APPLE__
+            if (g_metalView) { SDL_Metal_DestroyView(g_metalView); g_metalView = nullptr; }
+#endif
             if (g_window) { SDL_DestroyWindow(g_window); g_window = nullptr; }
             if (g_videoSubsystemOwned) {
                 SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -213,7 +225,12 @@ namespace gpu::video
         bool g_hasPresentedImage=false;
         bool g_presentPending=false;
         bool g_forceSwapResize=false;
+#ifdef __APPLE__
+        // CAMetalLayer only accepts BGRA-ordered 8-bit color formats.
+        constexpr plume::RenderFormat kSwapChainFormat = plume::RenderFormat::B8G8R8A8_UNORM;
+#else
         constexpr plume::RenderFormat kSwapChainFormat = plume::RenderFormat::R8G8B8A8_UNORM;
+#endif
         constexpr uint32_t kSwapChainBuffers = 3;
 
         void WaitForPresentGpu()
@@ -383,7 +400,9 @@ namespace gpu::video
             const bool background = getenv("LO_BACKGROUND") != nullptr;
             const auto config=settings::GetConfig();
             uint32_t flags = SDL_WINDOW_RESIZABLE | (background ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN);
-#ifndef _WIN32
+#ifdef __APPLE__
+            flags |= SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI;
+#elif !defined(_WIN32)
             flags |= SDL_WINDOW_VULKAN;
 #endif
             g_window = SDL_CreateWindow(lo_version::WindowTitle, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -398,6 +417,20 @@ namespace gpu::video
             // lives on the pumping thread.
             hid::Init();
             hid::SetExternalEventPump(true);
+#ifdef __APPLE__
+            g_metalView = SDL_Metal_CreateView(g_window);
+            SDL_SysWMinfo info{};
+            SDL_VERSION(&info.version);
+            if (!g_metalView || !SDL_GetWindowWMInfo(g_window, &info))
+            {
+                LOG_WARNING("video: Metal view creation failed: {}", SDL_GetError());
+                DestroyWindowResources();
+                return false;
+            }
+#ifdef LO_GPU_PLUME
+            g_renderWindow = { static_cast<void*>(info.info.cocoa.window), SDL_Metal_GetLayer(g_metalView) };
+#endif
+#endif
 #ifdef _WIN32
             SDL_SysWMinfo info{};
             SDL_VERSION(&info.version);
@@ -469,6 +502,8 @@ namespace gpu::video
             LOG_INFO("video: trying {}", backend::Name(candidate));
 #ifdef _WIN32
             g_interface = g_vulkan ? plume::CreateVulkanInterface() : plume::CreateD3D12Interface();
+#elif defined(__APPLE__)
+            g_interface = plume::CreateMetalInterface();
 #else
             g_interface = plume::CreateVulkanInterface(g_window);
 #endif
@@ -490,11 +525,18 @@ namespace gpu::video
             if (!g_commandList || !g_fence || !g_acquireSemaphore || !g_releaseSemaphore) return "command/synchronization initialization failed";
 #ifdef _WIN32
             g_swapChain = g_queue->createSwapChain(plume::RenderSwapChainDesc(g_nativeWindow, kSwapChainFormat, kSwapChainBuffers));
+#elif defined(__APPLE__)
+            g_swapChain = g_queue->createSwapChain(plume::RenderSwapChainDesc(g_renderWindow, kSwapChainFormat, kSwapChainBuffers));
 #else
             g_swapChain = g_queue->createSwapChain(plume::RenderSwapChainDesc(g_window, kSwapChainFormat, kSwapChainBuffers));
 #endif
             if (!g_swapChain || g_swapChain->isEmpty()) return "window surface/swapchain initialization failed";
             LogOutputPixels("created");
+#ifdef __APPLE__
+            // Presentation and renderer shaders are still DXIL/SPIR-V, which Metal
+            // cannot load. Stop here until they are converted to metallib.
+            return "Metal presentation and renderer shaders are not implemented yet";
+#endif
             g_uploadCapacity = uint64_t(kMaxWidth) * kMaxHeight * 4;
             g_uploadBuffer = g_device->createBuffer(plume::RenderBufferDesc::UploadBuffer(g_uploadCapacity));
             if (!g_uploadBuffer) return "presentation upload allocation failed";

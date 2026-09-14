@@ -40,6 +40,8 @@ struct Config
     WindowMode windowMode = WindowMode::Windowed;
 #ifdef _WIN32
     GraphicsBackend graphicsBackend = GraphicsBackend::D3D12; // Applied on the next process start.
+#elif defined(__APPLE__)
+    GraphicsBackend graphicsBackend = GraphicsBackend::Metal; // macOS only has the Metal renderer.
 #else
     GraphicsBackend graphicsBackend = GraphicsBackend::Vulkan; // Applied on the next process start.
 #endif

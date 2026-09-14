@@ -9,12 +9,13 @@
 
 namespace gpu::backend {
 // Persisted IDs. D3D11 is recognized, but has no renderer implementation.
-enum class Backend : uint32_t { D3D12 = 0, Vulkan = 1, D3D11 = 2 };
+// Metal is the macOS backend and is rejected elsewhere.
+enum class Backend : uint32_t { D3D12 = 0, Vulkan = 1, D3D11 = 2, Metal = 3 };
 inline const char* Name(Backend b) {
-    switch (b) { case Backend::D3D12: return "D3D12"; case Backend::Vulkan: return "Vulkan"; case Backend::D3D11: return "D3D11"; }
+    switch (b) { case Backend::D3D12: return "D3D12"; case Backend::Vulkan: return "Vulkan"; case Backend::D3D11: return "D3D11"; case Backend::Metal: return "Metal"; }
     return "Unknown";
 }
-inline bool Known(Backend b) { return b == Backend::D3D12 || b == Backend::Vulkan || b == Backend::D3D11; }
+inline bool Known(Backend b) { return b == Backend::D3D12 || b == Backend::Vulkan || b == Backend::D3D11 || b == Backend::Metal; }
 inline bool Equal(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -27,6 +28,7 @@ inline std::optional<Backend> Parse(std::string_view text) {
     if (Equal(text, "d3d12") || Equal(text, "dx12")) return Backend::D3D12;
     if (Equal(text, "vulkan")) return Backend::Vulkan;
     if (Equal(text, "d3d11") || Equal(text, "dx11")) return Backend::D3D11;
+    if (Equal(text, "metal")) return Backend::Metal;
     return std::nullopt;
 }
 inline std::optional<Backend> Requested(Backend configured, const char* environment) {
@@ -43,6 +45,8 @@ inline std::string Missing(Backend backend, const Capabilities& c) {
     if (backend == Backend::D3D11) return "Unsupported: D3D11 renderer is not implemented";
     if (!Known(backend)) return "Unsupported: unknown backend";
     if (!c.device) return "device creation failed";
+    // Metal has no geometry stage, so the Metal renderer cannot rely on one.
+    if (backend == Backend::Metal) return {};
     if (!c.geometryShader) return "geometry shaders unavailable";
     if (backend == Backend::D3D12) {
         if (c.shaderModel < 0x60) return "Shader Model 6.0 required";
@@ -79,7 +83,17 @@ Selection Select(Backend requested, Try&& attempt, Reset&& reset) {
     if (requested == Backend::D3D12) {
         result.attempts.push_back({Backend::D3D12, "D3D12 is not available on this platform"});
     }
+#ifdef __APPLE__
+    if (requested == Backend::Vulkan) {
+        result.attempts.push_back({Backend::Vulkan, "Vulkan is not used on macOS; Metal is the native backend"});
+    }
+    const auto candidate = Backend::Metal;
+#else
+    if (requested == Backend::Metal) {
+        result.attempts.push_back({Backend::Metal, "Metal is only available on macOS"});
+    }
     const auto candidate = Backend::Vulkan;
+#endif
     std::string error;
     try { error = attempt(candidate); }
     catch (const std::exception& e) { error = std::string("initialization exception: ") + e.what(); }
@@ -88,7 +102,8 @@ Selection Select(Backend requested, Try&& attempt, Reset&& reset) {
     reset();
     result.attempts.push_back({candidate, std::move(error)});
 #else
-    const auto first = requested == Backend::D3D11 ? Backend::D3D12 : requested;
+    if (requested == Backend::Metal) result.attempts.push_back({requested, "Metal is only available on macOS"});
+    const auto first = requested == Backend::D3D11 || requested == Backend::Metal ? Backend::D3D12 : requested;
     for (const auto backend : std::array{first, first == Backend::Vulkan ? Backend::D3D12 : Backend::Vulkan}) {
         std::string error;
         try { error = attempt(backend); }
