@@ -32,6 +32,8 @@
 #ifdef _WIN32
 #include <timeapi.h>
 #include <shellapi.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 // Runtime entry: set up guest memory, load default.xex and run its entry point
@@ -52,6 +54,12 @@ static std::filesystem::path ExecutableDirectory()
         path[n] = '\0';
         return std::filesystem::path(path).parent_path();
     }
+#elif defined(__APPLE__)
+    char path[4096]{};
+    uint32_t size = sizeof(path);
+    char resolved[PATH_MAX]{};
+    if (_NSGetExecutablePath(path, &size) == 0 && realpath(path, resolved))
+        return std::filesystem::path(resolved).parent_path();
 #endif
     return std::filesystem::current_path();
 }
@@ -104,7 +112,7 @@ int main(int argc, char* argv[])
         prepareShadersOnly |= strcmp(argv[i],"--prepare-shaders-only")==0;
     }
     const auto executableDirectory = ExecutableDirectory();
-#if defined(_WIN32) || defined(__linux__)
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
     // Direct launches keep all portable data beside the executable. Explicit
     // --game launches retain their caller's working directory for isolated tests.
     if(!explicitGame) {

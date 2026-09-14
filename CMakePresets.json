@@ -30,12 +30,29 @@
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
       }
+    },
+    {
+      "name": "macos-clang",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_OBJC_COMPILER": "/usr/bin/clang",
+        "CMAKE_OBJCXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "linux-clang",
       "configurePreset": "linux-clang"
+    },
+    {
+      "name": "macos-clang",
+      "configurePreset": "macos-clang"
     }
   ]
 }

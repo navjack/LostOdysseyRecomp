@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 using Microsoft::WRL::ComPtr;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #include <sys/mman.h>
 #include <strings.h>
@@ -17,6 +17,10 @@ using Microsoft::WRL::ComPtr;
 #define _strnicmp strncasecmp
 #define _fseeki64 fseeko
 #define _ftelli64 ftello
+#if defined(__APPLE__)
+// macOS declares the process environment block in no system header.
+extern char** environ;
+#endif
 #endif
 
 #include <algorithm>

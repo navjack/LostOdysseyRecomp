@@ -296,13 +296,13 @@ inline Result Scan(const fs::path& root, const fs::path& cacheDir,
         for (const auto& file : files) {
             const auto size = fs::file_size(file); totalBytes += size;
             identity << fs::absolute(file).generic_string() << '\t' << size << '\t'
-                     << fs::last_write_time(file).time_since_epoch().count() << '\n';
+                     << static_cast<long long>(fs::last_write_time(file).time_since_epoch().count()) << '\n';
         }
         // FPI changes also invalidate the discovery cache. Like FPD identity,
         // this is a size/mtime fingerprint, not a full game-integrity digest.
         for (const auto& file : indexes)
             identity << fs::absolute(file).generic_string() << '\t' << fs::file_size(file) << '\t'
-                     << fs::last_write_time(file).time_since_epoch().count() << '\n';
+                     << static_cast<long long>(fs::last_write_time(file).time_since_epoch().count()) << '\n';
         const auto source = cacheDir / "source";
         fs::create_directories(source);
         const auto manifest = cacheDir / "resources.manifest";

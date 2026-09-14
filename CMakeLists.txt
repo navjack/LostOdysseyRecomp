@@ -3,6 +3,11 @@ project(LostOdysseyRecomp VERSION 0.5.11 LANGUAGES C CXX)
 # Source version, not a release/commit or clean-checkout assertion.
 # Capture before nested projects can replace PROJECT_VERSION in their scope.
 set(LO_SOURCE_VERSION "${PROJECT_VERSION}")
+# plume's Metal backend has Objective-C++ sources; CMake needs those languages
+# enabled at the top level, not only inside the plume subproject.
+if(APPLE)
+    enable_language(OBJC OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +15,8 @@ set(BUILD_SHARED_LIBS OFF)
 
 # Sandy Bridge baseline (AVX): lets simde map VMX ops to real SSE4.1/AVX intrinsics
 # instead of scalar fallbacks (which pull in C23 roundeven*). Same as UnleashedRecomp.
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+# arm64 hosts (Apple Silicon) let simde map the same ops to NEON instead.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     add_compile_options(-march=sandybridge)
 endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

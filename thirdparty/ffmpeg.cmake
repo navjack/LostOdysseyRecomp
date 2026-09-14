@@ -174,3 +174,15 @@ endif()
 target_compile_options(lo_avcodec PRIVATE -w -O2)
 
 target_link_libraries(lo_avcodec PUBLIC lo_avutil)
+
+# The fork only ships Windows/Linux/Android configs. macOS uses a checked-in
+# asm-free config (see its header comment) ahead of the fork's config.h, and
+# drops the x86 init sources the same way the fork's premake filters do.
+if(APPLE)
+    foreach(target lo_avutil lo_avcodec)
+        target_include_directories(${target} BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ffmpeg-darwin")
+        get_target_property(sources ${target} SOURCES)
+        list(FILTER sources EXCLUDE REGEX "/x86/")
+        set_property(TARGET ${target} PROPERTY SOURCES ${sources})
+    endforeach()
+endif()

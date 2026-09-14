@@ -28,6 +28,7 @@ lo_add_header_test(LoResolveCopyPolicyTest ${CMAKE_SOURCE_DIR}/tools/tests/resol
 target_include_directories(LoVertexCacheTest PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/unordered_dense/include)
     lo_add_header_test(LoRenderTimingTest ${CMAKE_SOURCE_DIR}/tools/tests/render_timing_test.cpp)
     lo_add_header_test(LoRenderArenaTest ${CMAKE_SOURCE_DIR}/tools/tests/render_arena_policy_test.cpp)
+find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
 set(LO_PRIVATE_DIR ${CMAKE_SOURCE_DIR}/LostOdysseyRecompLib/private)
 
 # Logging stubs for every kernel import without an implementation. Regenerated
@@ -40,7 +41,7 @@ list(FILTER LO_RUNTIME_SOURCES EXCLUDE REGEX "imports_stubs\\.cpp$")
 set(LO_IMPORT_STUBS "${LO_RUNTIME_ROOT}/kernel/imports_stubs.cpp")
 add_custom_command(
     OUTPUT ${LO_IMPORT_STUBS}
-    COMMAND python "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
             "${LO_PRIVATE_DIR}/image_disc1.bin.sym" "${LO_RUNTIME_ROOT}" "${LO_IMPORT_STUBS}"
     DEPENDS ${LO_RUNTIME_SOURCES} "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py" "${LO_PRIVATE_DIR}/image_disc1.bin.sym"
     COMMENT "Generating kernel import stubs"
