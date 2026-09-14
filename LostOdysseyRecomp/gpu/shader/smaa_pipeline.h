@@ -2,6 +2,7 @@
 #include "../../../thirdparty/smaa/SMAA_source.h"
 #include "../../../thirdparty/smaa/AreaTex.h"
 #include "../../../thirdparty/smaa/SearchTex.h"
+#include "shader_format.h"
 
 // SMAA 1x HIGH, upstream color-edge/weight/neighborhood passes. Display-encoded
 // color and lookup data use UNORM views, with no implicit sRGB conversion.
@@ -71,10 +72,11 @@ float4 neighborhood(float4 pos : SV_Position) : SV_Target {
 }
 )";
         const char *entry[]={"edge","weight","neighborhood"};
+        const auto shaderFormat=xenos::ShaderFormatFor(d->getCapabilities().shaderFormat);
         for(int i=0;i<3;++i) {
-            auto c=xenos::CompileCachedHlsl(hlsl,entry[i],"ps_6_0",vulkan?xenos::ShaderBinaryFormat::Spirv:xenos::ShaderBinaryFormat::Dxil);
+            auto c=xenos::CompileCachedHlsl(hlsl,entry[i],"ps_6_0",shaderFormat.binary);
             if(!c.ok) { LOG_WARNING("SMAA {}: {}",entry[i],c.errors);return false; }
-            shaders[i]=d->createShader(c.bytecode.data(),c.bytecode.size(),entry[i],vulkan?RenderShaderFormat::SPIRV:RenderShaderFormat::DXIL);
+            shaders[i]=d->createShader(c.bytecode.data(),c.bytecode.size(),entry[i],shaderFormat.render);
             RenderGraphicsPipelineDesc pd;
             pd.pipelineLayout=layout.get();pd.vertexShader=vs;pd.pixelShader=shaders[i].get();
             pd.renderTargetCount=1;pd.renderTargetFormat[0]=RenderFormat::R8G8B8A8_UNORM;

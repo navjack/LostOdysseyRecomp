@@ -8,7 +8,8 @@
 // from the Windows SDK or next to the executable).
 namespace xenos
 {
-    enum class ShaderBinaryFormat { Dxil, Spirv };
+    // MetalIR: DXIL converted by Metal Shader Converter into plume's METAL_IR container (macOS).
+    enum class ShaderBinaryFormat { Dxil, Spirv, MetalIR };
     struct CompiledShader
     {
         std::vector<uint8_t> bytecode;
@@ -22,6 +23,8 @@ namespace xenos
     // Content identity of the loaded compiler and its validator companion.
     // Empty means it could not be certified; persistent failure reuse is disabled.
     const std::string& DxcIdentity();
+    // DxcIdentity plus any converter that produces the format (Metal Shader Converter version).
+    const std::string& ShaderCompilerIdentity(ShaderBinaryFormat format);
     struct DxcStatistics { uint64_t calls, succeeded, rejected, infrastructureFailed; };
     DxcStatistics GetDxcStatistics();
 

@@ -13,7 +13,8 @@ namespace xenos::cache {
 // Shared by the runtime and offline compiler. Bump for translation changes.
 inline constexpr unsigned Version = 22;
 using Backend = gpu::backend::Backend;
-enum class Format { Dxil, Spirv, Dxbc };
+// MetalIR is Metal Shader Converter output in plume's METAL_IR container (plume_metal_ir.h).
+enum class Format { Dxil, Spirv, Dxbc, MetalIR };
 struct Identity {
     Backend backend = Backend::D3D12;
     Format format = Format::Dxil;
@@ -29,6 +30,7 @@ inline std::string DefaultOptions(Backend backend) {
     case Backend::D3D12: return "main;vs/ps_6_0;HV2021;no-parentheses-equality;no-unused-value;all-resources-bound;O3;strip-debug;strip-reflect";
     case Backend::Vulkan: return "main;vs/ps_6_0;HV2021;no-parentheses-equality;no-unused-value;all-resources-bound;O3;strip-debug;spirv;vulkan1.2;dx-layout;vs-invert-y";
     case Backend::D3D11: return "reserved-dxbc-sm5-no-compiler";
+    case Backend::Metal: return "main;vs/ps_6_0;HV2021;no-parentheses-equality;no-unused-value;all-resources-bound;O3;strip-debug;strip-reflect;metal-ir;linear-layout;apple7;macos15.0;position-invariance";
     }
     return {};
 }
@@ -36,7 +38,8 @@ inline Identity MakeIdentity(Backend backend, std::string_view compiler) {
     Identity result;
     result.backend = backend;
     result.format = backend == Backend::Vulkan ? Format::Spirv :
-        backend == Backend::D3D11 ? Format::Dxbc : Format::Dxil;
+        backend == Backend::D3D11 ? Format::Dxbc :
+        backend == Backend::Metal ? Format::MetalIR : Format::Dxil;
     result.compiler = compiler;
     result.options = DefaultOptions(backend);
     return result;
@@ -44,7 +47,8 @@ inline Identity MakeIdentity(Backend backend, std::string_view compiler) {
 inline bool ValidIdentity(const Identity& identity) {
     const bool pair = (identity.backend == Backend::D3D12 && identity.format == Format::Dxil) ||
         (identity.backend == Backend::Vulkan && identity.format == Format::Spirv) ||
-        (identity.backend == Backend::D3D11 && identity.format == Format::Dxbc);
+        (identity.backend == Backend::D3D11 && identity.format == Format::Dxbc) ||
+        (identity.backend == Backend::Metal && identity.format == Format::MetalIR);
     return pair && identity.translatorVersion && !identity.compiler.empty() &&
         !identity.options.empty() && !identity.variant.empty();
 }
@@ -67,6 +71,7 @@ inline const char* Extension(Format format) {
     case Format::Dxil: return ".dxil";
     case Format::Spirv: return ".spv";
     case Format::Dxbc: return ".dxbc";
+    case Format::MetalIR: return ".plir";
     }
     return ".unsupported";
 }
@@ -125,8 +130,21 @@ inline bool CompleteSpirv(std::span<const uint8_t> data) {
     }
     return memoryModel && entryPoint;
 }
+// Validate plume's METAL_IR container framing and the embedded metallib magic.
+// Mirrors plume_metal_ir.h without requiring plume in offline tools.
+inline bool CompleteMetalIR(std::span<const uint8_t> data) {
+    struct Header { uint32_t magic, version, resourceCount, entryPointLength; uint64_t metallibSize; } header;
+    constexpr uint64_t ResourceSize = 16;
+    if (data.size() < sizeof(header)) return false;
+    std::memcpy(&header, data.data(), sizeof(header));
+    const uint64_t prefix = sizeof(header) + uint64_t(header.resourceCount) * ResourceSize + header.entryPointLength;
+    if (header.magic != 0x52494C50 || header.version != 1 || header.metallibSize < 4 || prefix + header.metallibSize != data.size())
+        return false;
+    return std::memcmp(data.data() + prefix, "MTLB", 4) == 0;
+}
 inline bool CompleteBinary(std::span<const uint8_t> data, Format format) {
     if (format == Format::Spirv) return CompleteSpirv(data);
+    if (format == Format::MetalIR) return CompleteMetalIR(data);
     if ((format != Format::Dxil && format != Format::Dxbc) || !CompleteContainer(data)) return false;
     auto word = [&](size_t offset) { uint32_t v; std::memcpy(&v,data.data()+offset,4); return v; };
     bool dxil=false, dxbc=false;

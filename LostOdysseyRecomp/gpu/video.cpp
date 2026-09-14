@@ -27,6 +27,8 @@
 #include "diagnostic_log.h"
 #ifdef _WIN32
 #include <plume_d3d12.h>
+#elif defined(__APPLE__)
+#include <plume_metal_ir.h>
 #endif
 #endif
 
@@ -202,6 +204,9 @@ namespace gpu::video
         std::vector<uint32_t> g_pixels;   // last untiled frame, R8G8B8A8
         uint32_t g_frameWidth = 0, g_frameHeight = 0;
         bool g_frameOnGpu = false;        // last frame came straight from a resolved surface
+        // Guest frames (GPU resolves and CPU untiling) are RGBA8 on every backend;
+        // the swap chain format can differ (CAMetalLayer requires BGRA8).
+        constexpr plume::RenderFormat kFrameFormat = plume::RenderFormat::R8G8B8A8_UNORM;
         uint32_t g_frontbufferPhysical = 0;
 
 #ifdef LO_GPU_PLUME
@@ -509,6 +514,10 @@ namespace gpu::video
 #endif
             if (!g_interface) return "API/loader initialization failed";
             g_device = g_interface->createDevice();
+#ifdef __APPLE__
+            // Metal renders Metal Shader Converter shaders, which bind D3D12-style descriptor sets.
+            if (g_device) plume::SetMetalShaderConverterDescriptorSets(g_device.get(), true);
+#endif
             if (g_device) {
                 const auto& description = g_device->getDescription();
                 LOG_INFO("video device: backend={} name={} driver_raw={} vendor_enum={} type_enum={} reported_device_memory_bytes={}",
@@ -532,11 +541,6 @@ namespace gpu::video
 #endif
             if (!g_swapChain || g_swapChain->isEmpty()) return "window surface/swapchain initialization failed";
             LogOutputPixels("created");
-#ifdef __APPLE__
-            // Presentation and renderer shaders are still DXIL/SPIR-V, which Metal
-            // cannot load. Stop here until they are converted to metallib.
-            return "Metal presentation and renderer shaders are not implemented yet";
-#endif
             g_uploadCapacity = uint64_t(kMaxWidth) * kMaxHeight * 4;
             g_uploadBuffer = g_device->createBuffer(plume::RenderBufferDesc::UploadBuffer(g_uploadCapacity));
             if (!g_uploadBuffer) return "presentation upload allocation failed";
@@ -848,7 +852,9 @@ namespace gpu::video
         {
             uint32_t rw = 0, rh = 0, rf = 0;
             plume::RenderTexture* source = renderer::AcquireResolvedSurface(physicalAddress & 0x1FFFFFFF, rw, rh, rf);
-            if (source && plume::RenderFormat(rf) == kSwapChainFormat)
+            // The presentation pipeline converts into the swap chain format; the
+            // direct copy fallback needs identical formats.
+            if (source && plume::RenderFormat(rf) == kFrameFormat && (g_presentation || kFrameFormat == kSwapChainFormat))
             {
                 uint32_t sourceWidth=width, sourceHeight=height;
                 renderer::ScaleResolvedSize(physicalAddress & 0x1FFFFFFF, sourceWidth, sourceHeight);
@@ -972,15 +978,16 @@ namespace gpu::video
 
         g_commandList->begin();
         if(!g_cpuFrame || g_cpuWidth!=width || g_cpuHeight!=height) {
-            g_cpuFrame=g_device->createTexture(plume::RenderTextureDesc::Texture2D(width,height,1,kSwapChainFormat));
+            g_cpuFrame=g_device->createTexture(plume::RenderTextureDesc::Texture2D(width,height,1,kFrameFormat));
             g_cpuWidth=width; g_cpuHeight=height;
         }
         auto* uploadTarget=g_presentation?g_cpuFrame.get():backBuffer;
+        const plume::RenderFormat uploadFormat=g_presentation?kFrameFormat:kSwapChainFormat;
         g_commandList->barriers(plume::RenderBarrierStage::COPY, plume::RenderTextureBarrier(uploadTarget, plume::RenderTextureLayout::COPY_DEST));
         plume::RenderBox box(0, 0, int32_t(copyWidth), int32_t(copyHeight), 0, 1);
         g_commandList->copyTextureRegion(
             plume::RenderTextureCopyLocation::Subresource(uploadTarget),
-            plume::RenderTextureCopyLocation::PlacedFootprint(g_uploadBuffer.get(), kSwapChainFormat, width, height, 1, rowPitch / 4),
+            plume::RenderTextureCopyLocation::PlacedFootprint(g_uploadBuffer.get(), uploadFormat, width, height, 1, rowPitch / 4),
             0, 0, 0, g_presentation?nullptr:&box);
         // This upload came from guest tiled memory, not the processed GPU resolve.
         // GPU-only scene-AA provenance cannot authorize skipping its legacy AA.
@@ -1042,7 +1049,10 @@ namespace gpu::video
             g_queue->executeCommandLists(lists,1,nullptr,0,nullptr,0,g_fence.get()); g_queue->waitForCommandFence(g_fence.get());
             std::vector<uint32_t> pixels(size_t(w)*h); const auto* data=static_cast<const uint8_t*>(readback->map());
             for(uint32_t y=0;y<h;y++) memcpy(pixels.data()+size_t(y)*w,data+size_t(y)*pitch,w*4);
-            readback->unmap(); return WritePpm(path,pixels,w,h);
+            readback->unmap();
+            if(kSwapChainFormat==plume::RenderFormat::B8G8R8A8_UNORM)
+                for(auto& p:pixels) p=(p&0xFF00FF00u)|((p>>16)&0xFFu)|((p&0xFFu)<<16);
+            return WritePpm(path,pixels,w,h);
         }
 #endif
         // LO_SCREENSHOT_RESOLVED=1: also dump every GPU-resolved surface (HDR

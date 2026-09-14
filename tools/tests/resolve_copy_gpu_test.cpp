@@ -7,14 +7,24 @@
 #include <cstdio>
 #include <cstring>
 
-namespace plume { std::unique_ptr<RenderInterface> CreateD3D12Interface(); std::unique_ptr<RenderInterface> CreateVulkanInterface(); }
+namespace plume {
+#ifdef __APPLE__
+    std::unique_ptr<RenderInterface> CreateMetalInterface();
+#else
+    std::unique_ptr<RenderInterface> CreateD3D12Interface(); std::unique_ptr<RenderInterface> CreateVulkanInterface();
+#endif
+}
 
 int main(int argc, char** argv) {
     using namespace plume;
     const bool vulkan=argc>1 && std::strcmp(argv[1],"--vulkan")==0;
     if(vulkan){--argc;++argv;}
     const bool skipInit = argc == 2 && std::strcmp(argv[1], "--uninitialized") == 0;
+#ifdef __APPLE__
+    auto api = CreateMetalInterface();
+#else
     auto api = vulkan ? CreateVulkanInterface() : CreateD3D12Interface();
+#endif
     if (!api) return 2;
     auto device = api->createDevice();
     if (!device) return 2;

@@ -5,8 +5,15 @@
 #include <gpu/shader/dxc_compiler.h>
 #include <plume_render_interface.h>
 #include <stdexcept>
+#ifdef __APPLE__
+#include <plume_metal_ir.h>
+#endif
 namespace plume {
+#ifdef __APPLE__
+std::unique_ptr<RenderInterface> CreateMetalInterface();
+#else
 std::unique_ptr<RenderInterface> CreateD3D12Interface();
+#endif
 }
 int main() {
   try {
@@ -16,18 +23,29 @@ int main() {
     static_assert(gpu::PackDepth24Unorm(0x1.fffffep-1f) == 0xFFFFFE);
     static_assert(((gpu::PackDepth24Unorm(1.0f) << 8) | 0xFF) == 0xFFFFFFFF);
     using namespace plume;
+#ifdef __APPLE__
+    auto api = CreateMetalInterface();
+    const auto binaryFormat = xenos::ShaderBinaryFormat::MetalIR;
+    const auto shaderFormat = RenderShaderFormat::METAL_IR;
+#else
     auto api = CreateD3D12Interface();
+    const auto binaryFormat = xenos::ShaderBinaryFormat::Dxil;
+    const auto shaderFormat = RenderShaderFormat::DXIL;
+#endif
     auto device = api->createDevice();
+#ifdef __APPLE__
+    SetMetalShaderConverterDescriptorSets(device.get(), true);
+#endif
     auto queue = device->createCommandQueue(RenderCommandListType::DIRECT);
     auto commands = queue->createCommandList();
     auto fence = device->createCommandFence();
     auto layout = device->createPipelineLayout(RenderPipelineLayoutDesc{});
     auto shader = [&](const char *source, const char *profile) {
-      auto c = xenos::CompileHlsl(source, "main", profile);
+      auto c = xenos::CompileHlsl(source, "main", profile, binaryFormat);
       if (!c.ok)
         throw std::runtime_error(c.errors);
       return device->createShader(c.bytecode.data(), c.bytecode.size(), "main",
-                                  RenderShaderFormat::DXIL);
+                                  shaderFormat);
     };
     auto vs = shader("float4 main(uint id:SV_VertexID):SV_Position { float2 "
                      "uv=float2((id<<1)&2,id&2); return "

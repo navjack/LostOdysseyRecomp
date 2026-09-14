@@ -6,6 +6,7 @@
 #ifdef LO_GPU_PLUME
 #include <plume_render_interface.h>
 #include <plume_render_interface_builders.h>
+#include "shader/shader_format.h"
 #include "shader/smaa_pipeline.h"
 namespace gpu
 {
@@ -43,9 +44,10 @@ bool Presentation::Init(RenderDevice *device, RenderFormat swapchainFormat)
     auto &p = *impl;
     p.initialized = false;
     p.device = device;
-    p.vulkan = device->getCapabilities().shaderFormat == RenderShaderFormat::SPIRV;
-    const auto binaryFormat = p.vulkan ? xenos::ShaderBinaryFormat::Spirv : xenos::ShaderBinaryFormat::Dxil;
-    const auto renderFormat = p.vulkan ? RenderShaderFormat::SPIRV : RenderShaderFormat::DXIL;
+    const auto shaderFormat = xenos::ShaderFormatFor(device->getCapabilities().shaderFormat);
+    p.vulkan = shaderFormat.vulkan;
+    const auto binaryFormat = shaderFormat.binary;
+    const auto renderFormat = shaderFormat.render;
     const char *source = R"(
 Texture2D<float4> frame : register(t0);
 #ifdef __spirv__

@@ -1,5 +1,6 @@
 #include "temporal_aa.h"
 #include "shader/dxc_compiler.h"
+#include "shader/shader_format.h"
 #include <array>
 #include <vector>
 #include <limits>
@@ -208,9 +209,10 @@ bool TemporalAA::Init(RenderDevice* device,bool hdrColor)
 {
     if(!device || impl->device) { impl->error="Init requires a non-null device and a fresh component";return false; }
     auto& p=*impl;p.device=device;
-    p.vulkan=device->getCapabilities().shaderFormat==RenderShaderFormat::SPIRV;
-    const auto binaryFormat=p.vulkan?xenos::ShaderBinaryFormat::Spirv:xenos::ShaderBinaryFormat::Dxil;
-    const auto renderFormat=p.vulkan?RenderShaderFormat::SPIRV:RenderShaderFormat::DXIL;
+    const auto shaderFormat=xenos::ShaderFormatFor(device->getCapabilities().shaderFormat);
+    p.vulkan=shaderFormat.vulkan;
+    const auto binaryFormat=shaderFormat.binary;
+    const auto renderFormat=shaderFormat.render;
     auto vs=xenos::CompileCachedHlsl(source,"vertex","vs_6_0",binaryFormat),ps=xenos::CompileCachedHlsl(source,"pixel","ps_6_0",binaryFormat),displayPs=xenos::CompileCachedHlsl(source,"displayPixel","ps_6_0",binaryFormat);
     if(!vs.ok||!ps.ok||!displayPs.ok) { p.error=vs.errors+ps.errors+displayPs.errors;return false; }
     p.vs=device->createShader(vs.bytecode.data(),vs.bytecode.size(),"vertex",renderFormat);

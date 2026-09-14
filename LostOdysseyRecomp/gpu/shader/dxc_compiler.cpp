@@ -21,6 +21,10 @@
 #include <dxcapi.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <metal_irconverter/metal_irconverter.h>
+#include <plume_metal_ir.h>
+#endif
 #include <type_traits>
 #ifndef __EMULATE_UUID
 #define __EMULATE_UUID 1
@@ -167,6 +171,170 @@ namespace xenos
             T* operator->() { return p; }
             explicit operator bool() const { return p != nullptr; }
         };
+    }
+
+    namespace
+    {
+        const char* FormatName(ShaderBinaryFormat format)
+        {
+            switch (format)
+            {
+            case ShaderBinaryFormat::Spirv: return "spirv";
+            case ShaderBinaryFormat::MetalIR: return "metal-ir";
+            default: return "dxil";
+            }
+        }
+
+#ifdef __APPLE__
+        // IRCompiler instances are not reentrant, so each compiling thread keeps its own.
+        struct MetalIRCompiler
+        {
+            IRCompiler* compiler = IRCompilerCreate();
+
+            MetalIRCompiler()
+            {
+                if (!compiler) return;
+                IRCompilerSetMinimumGPUFamily(compiler, IRGPUFamilyApple7);
+                IRCompilerSetMinimumDeploymentTarget(compiler, IROperatingSystem_macOS, "15.0");
+                // Guest depth pre-passes and later equal-depth passes need identical positions.
+                IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagPositionInvariance);
+            }
+            ~MetalIRCompiler() { if (compiler) IRCompilerDestroy(compiler); }
+        };
+
+        bool MapResourceType(IRResourceType type, plume::MetalIRResourceType& mapped)
+        {
+            switch (type)
+            {
+            case IRResourceTypeSRV: mapped = plume::MetalIRResourceType::SRV; return true;
+            case IRResourceTypeUAV: mapped = plume::MetalIRResourceType::UAV; return true;
+            case IRResourceTypeCBV: mapped = plume::MetalIRResourceType::CBV; return true;
+            case IRResourceTypeSampler: mapped = plume::MetalIRResourceType::SAMPLER; return true;
+            default: return false;
+            }
+        }
+#endif
+
+        // Replaces DXIL in result with plume's METAL_IR container: resource table, entry point, metallib.
+        void ConvertToMetalIR(CompiledShader& result, const char* entryPoint, const char* profile)
+        {
+            result.ok = false;
+#ifdef __APPLE__
+            const std::string_view stage(profile);
+            const bool pixel = stage.starts_with("ps_");
+            if (!pixel && !stage.starts_with("vs_"))
+            {
+                result.errors += "\nMetal Shader Converter output is only used for vertex and pixel shaders";
+                result.deterministicFailure = true;
+                return;
+            }
+
+            thread_local MetalIRCompiler converter;
+            if (!converter.compiler)
+            {
+                result.errors += "\nMetal Shader Converter unavailable";
+                return;
+            }
+
+            IRObject* input = IRObjectCreateFromDXIL(result.bytecode.data(), result.bytecode.size(), IRBytecodeOwnershipNone);
+            IRError* error = nullptr;
+            IRObject* output = input ? IRCompilerAllocCompileAndLink(converter.compiler, entryPoint, input, &error) : nullptr;
+            IRMetalLibBinary* metallib = IRMetalLibBinaryCreate();
+            IRShaderReflection* reflection = IRShaderReflectionCreate();
+            const IRShaderStage irStage = pixel ? IRShaderStageFragment : IRShaderStageVertex;
+            bool converted = output && IRObjectGetMetalLibBinary(output, irStage, metallib) &&
+                IRObjectGetReflection(output, irStage, reflection);
+
+            std::vector<uint8_t> container;
+            if (converted)
+            {
+                std::vector<IRResourceLocation> locations(IRShaderReflectionGetResourceCount(reflection));
+                IRShaderReflectionGetResourceLocations(reflection, locations.data());
+                std::vector<plume::MetalIRResource> resources;
+                resources.reserve(locations.size());
+                for (const auto& location : locations)
+                {
+                    plume::MetalIRResource resource;
+                    if (!MapResourceType(location.resourceType, resource.type))
+                    {
+                        result.errors += "\nMetal Shader Converter produced an unsupported top-level resource type";
+                        converted = false;
+                        break;
+                    }
+                    resource.space = location.space;
+                    resource.slot = location.slot;
+                    resource.topLevelOffset = location.topLevelOffset;
+                    resources.push_back(resource);
+                }
+
+                const char* function = IRShaderReflectionGetEntryPointFunctionName(reflection);
+                const std::string_view functionName = function ? function : entryPoint;
+                const size_t metallibSize = IRMetalLibGetBytecodeSize(metallib);
+                if (converted && metallibSize)
+                {
+                    plume::MetalIRShaderHeader header;
+                    header.resourceCount = uint32_t(resources.size());
+                    header.entryPointLength = uint32_t(functionName.size());
+                    header.metallibSize = metallibSize;
+                    const size_t tableBytes = resources.size() * sizeof(plume::MetalIRResource);
+                    container.resize(sizeof(header) + tableBytes + functionName.size() + metallibSize);
+                    uint8_t* cursor = container.data();
+                    std::memcpy(cursor, &header, sizeof(header));
+                    cursor += sizeof(header);
+                    std::memcpy(cursor, resources.data(), tableBytes);
+                    cursor += tableBytes;
+                    std::memcpy(cursor, functionName.data(), functionName.size());
+                    cursor += functionName.size();
+                    IRMetalLibGetBytecode(metallib, cursor);
+                }
+                else converted = false;
+            }
+
+            if (converted)
+            {
+                result.bytecode = std::move(container);
+                result.ok = true;
+            }
+            else if (!input)
+            {
+                result.errors += "\nMetal Shader Converter rejected the DXIL container";
+                result.deterministicFailure = true;
+            }
+            else if (error)
+            {
+                result.errors += "\nMetal Shader Converter error code " + std::to_string(IRErrorGetCode(error));
+                result.deterministicFailure = true;
+            }
+            else if (result.errors.find("Metal Shader Converter") == std::string::npos)
+            {
+                result.errors += "\nMetal Shader Converter produced no metallib";
+            }
+
+            IRShaderReflectionDestroy(reflection);
+            IRMetalLibBinaryDestroy(metallib);
+            if (error) IRErrorDestroy(error);
+            if (output) IRObjectDestroy(output);
+            if (input) IRObjectDestroy(input);
+#else
+            (void)entryPoint;
+            (void)profile;
+            result.errors += "\nMetal Shader Converter output is only available on macOS";
+#endif
+        }
+    }
+
+    const std::string& ShaderCompilerIdentity(ShaderBinaryFormat format)
+    {
+#ifdef __APPLE__
+        if (format == ShaderBinaryFormat::MetalIR)
+        {
+            static const std::string identity = DxcIdentity().empty() ? std::string() :
+                DxcIdentity() + ";metal-shaderconverter=" + std::to_string(IR_VERSION_MAJOR) + "." + std::to_string(IR_VERSION_MINOR);
+            return identity;
+        }
+#endif
+        (void)format;
+        return DxcIdentity();
     }
 
     bool DxcAvailable()
@@ -323,7 +491,11 @@ namespace xenos
     CompiledShader CompileHlsl(const std::string& source, const char* entry, const char* profile, ShaderBinaryFormat format, bool debugInfo)
     {
         const auto start = std::chrono::steady_clock::now();
-        auto result = CompileHlslImpl(source, entry, profile, format, debugInfo);
+        // Metal Shader Converter input is ordinary DXIL.
+        auto result = CompileHlslImpl(source, entry, profile,
+            format == ShaderBinaryFormat::MetalIR ? ShaderBinaryFormat::Dxil : format, debugInfo);
+        if (result.ok && format == ShaderBinaryFormat::MetalIR)
+            ConvertToMetalIR(result, entry, profile);
         // This is compilation-time provenance, not a guest shader or cache key.
         // Do not add content hashing to the cache-hit/per-draw path.
         if (os::shaderlog::Current().IsOpen())
@@ -334,7 +506,7 @@ namespace xenos
                 result.ok ? "compile-success" : result.deterministicFailure ? "compile-rejected" : "compile-failed",
                 os::shaderlog::HashNamespace::HlslSourceSha256,
                 "source={} profile={} entry={} format={} debug={} bytes={} elapsed_ms={:.3f}\n{}", hash, profile, entry,
-                format == ShaderBinaryFormat::Spirv ? "spirv" : "dxil", debugInfo, result.bytecode.size(),
+                FormatName(format), debugInfo, result.bytecode.size(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), result.errors);
         }
         return result;
@@ -350,8 +522,9 @@ namespace xenos
         const std::string key = source + '\0' + entry + '\0' + profile + "lo-dxc-vulkan12-dx-layout-v1";
         uint64_t hash = 0xcbf29ce484222325ull;
         for (uint8_t byte : key) { hash ^= byte; hash *= 0x100000001b3ull; }
-        const bool spirv = format == ShaderBinaryFormat::Spirv;
-        auto identity = cache::MakeIdentity(spirv ? cache::Backend::Vulkan : cache::Backend::D3D12, DxcIdentity());
+        const auto backend = format == ShaderBinaryFormat::Spirv ? cache::Backend::Vulkan :
+            format == ShaderBinaryFormat::MetalIR ? cache::Backend::Metal : cache::Backend::D3D12;
+        auto identity = cache::MakeIdentity(backend, ShaderCompilerIdentity(format));
         identity.variant = "builtin:" + std::to_string(std::strlen(entry)) + ":" + entry +
             ":" + std::to_string(std::strlen(profile)) + ":" + profile;
         const bool pixel = std::string_view(profile).starts_with("ps_");
@@ -364,12 +537,12 @@ namespace xenos
             result.ok = true;
             if (os::shaderlog::Current().IsOpen())
                 SHADER_LOG_INFO("cache-hit", BuiltinKeyFnv, "builtin key={:016x} profile={} entry={} format={} bytes={}",
-                    hash, profile, entry, spirv ? "spirv" : "dxil", result.bytecode.size());
+                    hash, profile, entry, FormatName(format), result.bytecode.size());
             return result;
         }
         if (os::shaderlog::Current().IsOpen())
             SHADER_LOG_INFO("cache-miss", BuiltinKeyFnv, "builtin key={:016x} profile={} entry={} format={}",
-                hash, profile, entry, spirv ? "spirv" : "dxil");
+                hash, profile, entry, FormatName(format));
         result = CompileHlsl(source, entry, profile, format);
         if (result.ok && (!configured || *configured)) {
             std::error_code error;

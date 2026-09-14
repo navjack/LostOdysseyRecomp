@@ -26,6 +26,7 @@
 #include <settings/config.h>
 #include "shader/xenos_translator.h"
 #include "shader/dxc_compiler.h"
+#include "shader/shader_format.h"
 #include "shader/cache.h"
 #include "shader/binary_cache.h"
 #include "shader/preparation_queue.h"
@@ -310,6 +311,7 @@ namespace gpu::renderer
         {
             RenderDevice* device = nullptr;
             bool vulkan = false;
+            bool metal = false; // Metal Shader Converter shaders with the D3D12 layout
             xenos::ShaderBinaryFormat binaryFormat = xenos::ShaderBinaryFormat::Dxil;
             RenderShaderFormat renderFormat = RenderShaderFormat::DXIL;
             uint64_t constantAddresses[3]{};
@@ -984,11 +986,14 @@ namespace gpu::renderer
                 descriptorBatchLimit = render_batch::DescriptorLimit(vulkan, batchOverride ? batchOverride : "");
                 LOG_INFO("renderer: descriptor reuse={} backend={} limit={} gpu_slots={} (LO_DESCRIPTOR_REUSE=0 disables reuse)",
                     descriptorReuse, vulkan ? "Vulkan" : "D3D12", descriptorBatchLimit, kGpuSlots);
-                binaryFormat = vulkan ? xenos::ShaderBinaryFormat::Spirv : xenos::ShaderBinaryFormat::Dxil;
-                renderFormat = vulkan ? RenderShaderFormat::SPIRV : RenderShaderFormat::DXIL;
+                const auto shaderFormat = device ? xenos::ShaderFormatFor(device->getCapabilities().shaderFormat) : xenos::DeviceShaderFormat{};
+                metal = shaderFormat.render == RenderShaderFormat::METAL_IR;
+                binaryFormat = shaderFormat.binary;
+                renderFormat = shaderFormat.render;
                 if (!device || !queue)
                     return InitFailure("device_or_queue");
-                cacheIdentity = xenos::cache::MakeIdentity(vulkan ? backend::Backend::Vulkan : backend::Backend::D3D12, xenos::DxcIdentity());
+                cacheIdentity = xenos::cache::MakeIdentity(vulkan ? backend::Backend::Vulkan :
+                    metal ? backend::Backend::Metal : backend::Backend::D3D12, xenos::ShaderCompilerIdentity(binaryFormat));
 
                 // Optional collection resources are prepared before the game loop.
                 // Enabling collection later never compiles or maps on a draw; an
@@ -1133,7 +1138,7 @@ namespace gpu::renderer
                 CompileRectListGs();
                 CompileBlitShaders();
                 CompileTransferShader();
-                if (!rectListGs) return InitFailure("rect_list_shader.create");
+                if (!rectListGs && !metal) return InitFailure("rect_list_shader.create");
                 if (!blitVs || !blitPs) return InitFailure("blit_shader.create");
                 if (!transferPs) return InitFailure("transfer_shader.create");
                 PrepareKnownShaders();
@@ -1469,6 +1474,12 @@ namespace gpu::renderer
 
             void CompileRectListGs()
             {
+                if (metal)
+                {
+                    // Metal has no geometry stage; rect lists need a vertex-shader expansion there.
+                    LOG_WARNING("renderer: Metal rect lists are drawn without expansion (no geometry stage)");
+                    return;
+                }
                 std::string src = R"HLSL(
 struct V { float4 pos : SV_Position; float4 t[16] : TEXCOORD0; };
 [maxvertexcount(4)]
@@ -1751,7 +1762,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
             {
                 pipelineCacheEnabled = !shaderCacheDir.empty() && !getenv("LO_NO_PIPELINE_CACHE");
                 if (!pipelineCacheEnabled) return;
-                const auto path = std::filesystem::path(shaderCacheDir) / (vulkan ? "pipelines_vk12_1.bin" : "pipelines.bin");
+                const auto path = std::filesystem::path(shaderCacheDir) / (vulkan ? "pipelines_vk12_1.bin" : metal ? "pipelines_metal_ir.bin" : "pipelines.bin");
                 const auto loaded = gpu::pipeline_cache::Load(path, xenos::cache::Version, kPipelineRecipeVersion, ValidPipelineRecipe);
                 if (!loaded.error.empty()) LOG_WARNING("renderer: ignoring pipeline recipes: {}", loaded.error);
                 for (const auto& key : loaded.keys) pipelineRecipes.insert(key);
@@ -1826,7 +1837,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 if (!pipelineRecipesDirty) return;
                 try {
                     std::vector<PipelineKey> snapshot(pipelineRecipes.begin(), pipelineRecipes.end());
-                    const auto path = std::filesystem::path(shaderCacheDir) / (vulkan ? "pipelines_vk12_1.bin" : "pipelines.bin");
+                    const auto path = std::filesystem::path(shaderCacheDir) / (vulkan ? "pipelines_vk12_1.bin" : metal ? "pipelines_metal_ir.bin" : "pipelines.bin");
                     pipelineWrite = std::async(std::launch::async, [path, snapshot = std::move(snapshot)] {
                         return gpu::pipeline_cache::Write(path, snapshot, xenos::cache::Version, kPipelineRecipeVersion, ValidPipelineRecipe);
                     });
@@ -1842,12 +1853,13 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 const auto& compilerIdentity = xenos::DxcIdentity();
                 const bool retryFailures = getenv("LO_SHADER_RETRY_FAILURES") != nullptr;
                 const auto bundlePath = std::filesystem::path(shaderCacheDir) /
-                    (vulkan ? "startup_vk12_v1.bundle" : "startup_dxil_v1.bundle");
+                    (vulkan ? "startup_vk12_v1.bundle" : metal ? "startup_metal_ir_v1.bundle" : "startup_dxil_v1.bundle");
                 const auto xex = std::span<const uint8_t>(static_cast<const uint8_t*>(g_memory.Translate(0x82000000)), 0x185C60);
                 auto snapshot = [&](bool compiled = true, bool sources = true) {
                     return startup::Snapshot(FileSystem::GetGameRoot(), shaderCacheDir, cacheIdentity, xex, compiled, sources);
                 };
-                const bool bundleEnabled = !compilerIdentity.empty() && !getenv("LO_SHADER_FULL_SCAN") &&
+                // Startup bundle contracts only describe DXIL and SPIR-V; Metal uses the per-shader cache.
+                const bool bundleEnabled = !metal && !compilerIdentity.empty() && !getenv("LO_SHADER_FULL_SCAN") &&
                     !getenv("LO_SHADER_HLSL_DIR") && !retryFailures;
                 LOG_INFO("renderer: shader startup cache: {}, compiler identity {}", bundlePath.string(),
                     compilerIdentity.empty() ? "unavailable (persistent reuse disabled)" : compilerIdentity);
@@ -2132,7 +2144,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                         if (entry.valid) ++modulesReady;
                         else {
                             SHADER_LOG_ERROR("shader-module-failed", RendererByteFnv, "preparation {} shader={:016x} bytes={} format={}",
-                                item.pixel ? "pixel" : "vertex", item.hash, item.bytecode.size(), vulkan ? "spirv" : "dxil");
+                                item.pixel ? "pixel" : "vertex", item.hash, item.bytecode.size(), vulkan ? "spirv" : metal ? "metal-ir" : "dxil");
                             ++modulesFailed; ++failed; initializationModuleFailure = true; bundleWriter.reset();
                         }
                     }
@@ -2267,7 +2279,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 os::shaderlog::Log(entry.valid ? LogType::Info : LogType::Error,
                     entry.valid ? "shader-module-ready" : "shader-module-failed", os::shaderlog::HashNamespace::RendererByteFnv,
                     "{} shader={:016x} format={} words={} bytes={} frame={}", pixel ? "pixel" : "vertex", hash,
-                    vulkan ? "spirv" : "dxil", count, dxil.size(), frame);
+                    vulkan ? "spirv" : metal ? "metal-ir" : "dxil", count, dxil.size(), frame);
                 if (!entry.info.errors.empty())
                     SHADER_LOG_WARNING("translation-notes", RendererByteFnv, "renderer: {} shader {:016x} notes: {}", pixel ? "pixel" : "vertex", hash, entry.info.errors);
                 if(!pixel)PreparePositionEvidence(entry,words,count,hash);
@@ -4772,7 +4784,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                     rs.tex->guestWidth = guestW; rs.tex->guestHeight = guestH;
                     rs.tex->resolutionHeight = depth.resolutionHeight;
                     rs.tex->texture = device->createTexture(RenderTextureDesc::Texture2D(texW, texH, 1, RenderFormat::R32_FLOAT,
-                        vulkan ? RenderTextureFlag::RENDER_TARGET : RenderTextureFlag::NONE));
+                        (vulkan || metal) ? RenderTextureFlag::RENDER_TARGET : RenderTextureFlag::NONE));
                     rs.tex->layout = RenderTextureLayout::UNKNOWN;
                     if (!rs.tex->texture)
                     {
@@ -4793,12 +4805,13 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 h = std::min(h, texH - y0);
                 if (w == 0 || h == 0)
                     return;
-                if (vulkan) {
-                    // Vulkan 1.2 image copies cannot reinterpret D32/S8 storage
-                    // as an R32 color plane. Load the depth aspect and write the
-                    // exact float value, retaining the destination rectangle.
+                if (vulkan || metal) {
+                    // Vulkan 1.2 image copies and Metal blit copies cannot
+                    // reinterpret D32/S8 storage as an R32 color plane. Load the
+                    // depth aspect and write the exact float value, retaining
+                    // the destination rectangle.
                     if (!BlitRegion(depth, *rs.tex, x0, y0, w, h)) {
-                        LOG_ERROR("renderer: Vulkan depth resolve blit failed");
+                        LOG_ERROR("renderer: {} depth resolve blit failed", vulkan ? "Vulkan" : "Metal");
                         return;
                     }
                 } else {

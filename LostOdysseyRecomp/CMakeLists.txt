@@ -99,6 +99,45 @@ endif()
 if(APPLE)
     # os/main_thread.cpp serves the main run loop and dispatch queue.
     target_link_libraries(LostOdysseyRecomp PRIVATE "-framework CoreFoundation")
+
+    # Apple Metal Shader Converter turns DXIL into metallib during shader preparation.
+    find_path(LO_METAL_IRCONVERTER_INCLUDE_DIR metal_irconverter/metal_irconverter.h PATHS /usr/local/include)
+    find_library(LO_METAL_IRCONVERTER_LIBRARY metalirconverter PATHS /usr/local/lib)
+    if(NOT LO_METAL_IRCONVERTER_INCLUDE_DIR OR NOT LO_METAL_IRCONVERTER_LIBRARY)
+        message(FATAL_ERROR "Metal Shader Converter not found; install it from https://developer.apple.com/metal/shader-converter/")
+    endif()
+    get_filename_component(LO_METAL_IRCONVERTER_LIBRARY_DIR "${LO_METAL_IRCONVERTER_LIBRARY}" DIRECTORY)
+    add_library(lo_metal_irconverter INTERFACE)
+    target_include_directories(lo_metal_irconverter INTERFACE "${LO_METAL_IRCONVERTER_INCLUDE_DIR}" "${CMAKE_SOURCE_DIR}/thirdparty/plume")
+    target_link_libraries(lo_metal_irconverter INTERFACE "${LO_METAL_IRCONVERTER_LIBRARY}")
+    target_link_options(lo_metal_irconverter INTERFACE "LINKER:-rpath,@executable_path" "LINKER:-rpath,${LO_METAL_IRCONVERTER_LIBRARY_DIR}")
+    target_link_libraries(LostOdysseyRecomp PRIVATE lo_metal_irconverter)
+    if(LO_BUILD_GPU)
+        # Headless Metal runs of the shared GPU fixtures.
+        add_executable(LoResolveCopyGpuTest EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tools/tests/resolve_copy_gpu_test.cpp)
+        target_include_directories(LoResolveCopyGpuTest PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/plume)
+        target_compile_features(LoResolveCopyGpuTest PRIVATE cxx_std_20)
+        target_link_libraries(LoResolveCopyGpuTest PRIVATE plume)
+        add_executable(LoStencilTest EXCLUDE_FROM_ALL
+            ${CMAKE_SOURCE_DIR}/tools/tests/stencil_test.cpp
+            ${LO_RUNTIME_ROOT}/os/log_file.cpp
+            ${LO_RUNTIME_ROOT}/gpu/shader/dxc_compiler.cpp)
+        target_include_directories(LoStencilTest PRIVATE ${LO_RUNTIME_ROOT} ${CMAKE_SOURCE_DIR}/thirdparty/plume
+            ${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/dxc-bin/inc)
+        target_compile_features(LoStencilTest PRIVATE cxx_std_20)
+        set_target_properties(LoStencilTest PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+        target_link_libraries(LoStencilTest PRIVATE plume lo_metal_irconverter fmt::fmt)
+        # Renderer-shaped METAL_IR layout: root CBVs, byte-address buffers, texture sets.
+        add_executable(LoMetalBackendTest EXCLUDE_FROM_ALL
+            ${CMAKE_SOURCE_DIR}/tools/tests/metal_backend_test.cpp
+            ${LO_RUNTIME_ROOT}/os/log_file.cpp
+            ${LO_RUNTIME_ROOT}/gpu/shader/dxc_compiler.cpp)
+        target_include_directories(LoMetalBackendTest PRIVATE ${LO_RUNTIME_ROOT} ${CMAKE_SOURCE_DIR}/thirdparty/plume
+            ${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/dxc-bin/inc)
+        target_compile_features(LoMetalBackendTest PRIVATE cxx_std_20)
+        set_target_properties(LoMetalBackendTest PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+        target_link_libraries(LoMetalBackendTest PRIVATE plume lo_metal_irconverter fmt::fmt)
+    endif()
 endif()
 target_link_libraries(LostOdysseyRecomp PRIVATE lo_avcodec)
 
@@ -341,6 +380,9 @@ add_executable(LoShaderTool
 target_compile_features(LoShaderTool PRIVATE cxx_std_20)
 target_compile_definitions(LoShaderTool PRIVATE NOMINMAX)
 target_link_libraries(LoShaderTool PRIVATE fmt::fmt)
+if(APPLE)
+    target_link_libraries(LoShaderTool PRIVATE lo_metal_irconverter)
+endif()
 
 # Tests packed mip block origins without game assets.
 add_executable(LoXmaLoopTest EXCLUDE_FROM_ALL ${CMAKE_SOURCE_DIR}/tools/tests/xma_loop_test.cpp)
