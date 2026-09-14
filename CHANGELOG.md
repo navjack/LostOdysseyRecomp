@@ -4,6 +4,18 @@ One record of completed changes, with unpublished work separated from verified r
 
 本文统一记录已完成改动，并区分未发布内容与已确认发布版本；日期采用 UTC 发布日期。后续计划见[路线图](docs/ROADMAP.zh-CN.md)，不作为已发布功能记录。
 
+## Unreleased / 未发布
+
+### English
+
+- Add the first playable Linux Vulkan-only, unbundled ELF path. The `linux-clang` CMake preset builds generated PowerPC sources directly, loads `libdxcompiler.so` through the Linux DXC path, uses SDL Vulkan presentation, and supports explicit `--game` candidates for the install root, `disc1` or `default.xex`.
+- The first playable was accepted on a local WSL2 Manjaro path using Mesa Dozen Vulkan-on-D3D12, with a watched window session and clean exit after the user closed it. This is not native-Linux-GPU, whole-game, Steam Deck, package, installer or published-release acceptance; no Linux package is published.
+
+### 简体中文
+
+- 增加首个可玩的 Linux Vulkan-only 未打包 ELF 路径。`linux-clang` CMake preset 直接编译生成的 PowerPC 源码，通过 Linux DXC 路径加载 `libdxcompiler.so`，使用 SDL Vulkan presentation，并支持将安装根目录、`disc1` 或 `default.xex` 作为显式 `--game` 候选。
+- 首可玩路径已在本地 WSL2 Manjaro 的 Mesa Dozen Vulkan-on-D3D12 环境中由用户观看窗口并在用户关闭后正常退出。该结果不代表原生 Linux GPU、全游戏、Steam Deck、安装包、安装器或已发布版本验收；目前没有发布 Linux 包。
+
 ## v0.5.11 — 2026-09-14 / Published / 已发布
 
 ### English
