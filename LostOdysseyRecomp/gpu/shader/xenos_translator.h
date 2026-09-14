@@ -40,4 +40,9 @@ namespace xenos
 
     // HLSL prelude (constant buffers, fetch helpers) prepended to every shader.
     const char* GetShaderCommonHlsl();
+
+    // Rewrites a translated vertex shader into a rect-list expansion for backends
+    // without a geometry stage. SV_VertexID must carry 6 * first guest vertex +
+    // corner (0..5). Returns an empty string if the entry point is not recognised.
+    std::string WrapRectListVertexShader(const std::string& hlsl);
 }

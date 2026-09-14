@@ -137,6 +137,17 @@ if(APPLE)
         target_compile_features(LoMetalBackendTest PRIVATE cxx_std_20)
         set_target_properties(LoMetalBackendTest PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
         target_link_libraries(LoMetalBackendTest PRIVATE plume lo_metal_irconverter fmt::fmt)
+        # Rect-list vertex-shader expansion (geometry-stage replacement).
+        add_executable(LoRectListTest EXCLUDE_FROM_ALL
+            ${CMAKE_SOURCE_DIR}/tools/tests/rect_list_test.cpp
+            ${LO_RUNTIME_ROOT}/os/log_file.cpp
+            ${LO_RUNTIME_ROOT}/gpu/shader/xenos_translator.cpp
+            ${LO_RUNTIME_ROOT}/gpu/shader/dxc_compiler.cpp)
+        target_include_directories(LoRectListTest PRIVATE ${LO_RUNTIME_ROOT} ${CMAKE_SOURCE_DIR}/thirdparty/plume
+            ${CMAKE_SOURCE_DIR}/tools/XenosRecomp/thirdparty/dxc-bin/inc)
+        target_compile_features(LoRectListTest PRIVATE cxx_std_20)
+        set_target_properties(LoRectListTest PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+        target_link_libraries(LoRectListTest PRIVATE plume lo_metal_irconverter fmt::fmt)
     endif()
 endif()
 target_link_libraries(LostOdysseyRecomp PRIVATE lo_avcodec)

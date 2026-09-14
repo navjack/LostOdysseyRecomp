@@ -1607,4 +1607,53 @@ float4 max4(float4 src0)
     {
         return kCommonHlsl;
     }
+
+    std::string WrapRectListVertexShader(const std::string& hlsl)
+    {
+        // Must match EmitPrologue's vertex entry signature exactly.
+        std::string entry = "void main(\n\tin uint xeVertexId : SV_VertexID,\n\tout precise float4 oPos : SV_Position";
+        for (uint32_t i = 0; i < 16; i++)
+            entry += fmt::format(",\n\tout float4 o{0} : TEXCOORD{0}", i);
+        entry += ")\n{\n";
+        const size_t pos = hlsl.find(entry);
+        if (pos == std::string::npos)
+            return {};
+
+        std::string helper = "void XeGuestMain(uint xeVertexId, out float4 oPos";
+        for (uint32_t i = 0; i < 16; i++)
+            helper += fmt::format(", out float4 o{}", i);
+        helper += ")\n{\n";
+        std::string out = hlsl;
+        out.replace(pos, entry.size(), helper);
+
+        // SV_VertexID packs 6 * first guest vertex + corner. Run the guest shader for
+        // the three corners, then emit the rect as triangles (a, b, d) and (d, b, last),
+        // the same vertices and strip winding as the D3D12/Vulkan geometry shader.
+        out += "\nvoid main(in uint xeRectVertex : SV_VertexID, out precise float4 oPos : SV_Position";
+        for (uint32_t i = 0; i < 16; i++)
+            out += fmt::format(", out float4 o{0} : TEXCOORD{0}", i);
+        out += ")\n{\n";
+        out += "\tuint xeRectFirst = xeRectVertex / 6u;\n";
+        out += "\tuint xeRectCorner = xeRectVertex % 6u;\n";
+        out += "\tfloat4 xeRectPos[3];\n\tfloat4 xeRectOut[3][16];\n";
+        out += "\tfor (uint i = 0u; i < 3u; i++)\n\t\tXeGuestMain(xeRectFirst + i, xeRectPos[i]";
+        for (uint32_t i = 0; i < 16; i++)
+            out += fmt::format(", xeRectOut[i][{}]", i);
+        out += ");\n";
+        out += "\tfloat2 p0 = xeRectPos[0].xy / xeRectPos[0].w, p1 = xeRectPos[1].xy / xeRectPos[1].w, p2 = xeRectPos[2].xy / xeRectPos[2].w;\n";
+        out += "\tfloat e0 = dot(p1 - p2, p1 - p2), e1 = dot(p2 - p0, p2 - p0), e2 = dot(p0 - p1, p0 - p1);\n";
+        out += "\tuint c = (e0 >= e1 && e0 >= e2) ? 0u : (e1 >= e2 ? 1u : 2u);\n";
+        out += "\tuint a = c, b = (c + 1u) % 3u, d = (c + 2u) % 3u;\n";
+        out += "\tuint v = xeRectCorner == 0u ? a : ((xeRectCorner == 1u || xeRectCorner == 4u) ? b : d);\n";
+        out += "\tif (xeRectCorner == 5u)\n\t{\n";
+        out += "\t\toPos = xeRectPos[b] + xeRectPos[d] - xeRectPos[a];\n";
+        for (uint32_t i = 0; i < 16; i++)
+            out += fmt::format("\t\to{0} = xeRectOut[b][{0}] + xeRectOut[d][{0}] - xeRectOut[a][{0}];\n", i);
+        out += "\t}\n\telse\n\t{\n";
+        out += "\t\toPos = xeRectPos[v];\n";
+        for (uint32_t i = 0; i < 16; i++)
+            out += fmt::format("\t\to{0} = xeRectOut[v][{0}];\n", i);
+        out += "\t}\n}\n";
+        return out;
+    }
 }

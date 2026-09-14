@@ -405,6 +405,9 @@ namespace gpu::renderer
             std::unique_ptr<RenderShader> rectListGs;
 
             std::unordered_map<uint64_t, Shader> shaders[2];
+            // Metal rect-list vertex shaders by guest VS hash (pipeline workers share it).
+            std::unordered_map<uint64_t, Shader> rectListShaders;
+            std::mutex rectListShaderMutex;
             std::unordered_map<PipelineKey, std::unique_ptr<RenderPipeline>, PipelineKeyHash> pipelines;
             // Full state recipes are portable; driver blobs and object pointers
             // are never persisted. Render maps stay on the command thread.
@@ -1476,8 +1479,8 @@ namespace gpu::renderer
             {
                 if (metal)
                 {
-                    // Metal has no geometry stage; rect lists need a vertex-shader expansion there.
-                    LOG_WARNING("renderer: Metal rect lists are drawn without expansion (no geometry stage)");
+                    // Metal has no geometry stage; rect-list pipelines use
+                    // GetRectListShader's vertex-shader expansion instead.
                     return;
                 }
                 std::string src = R"HLSL(
@@ -2286,6 +2289,33 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 return entry.valid ? &entry : nullptr;
             }
 
+            // Metal has no geometry stage: rect-list pipelines use the translated vertex
+            // shader wrapped to expand each rect from packed SV_VertexID corners.
+            Shader* GetRectListShader(const Shader& base, uint64_t hash)
+            {
+                std::lock_guard lock(rectListShaderMutex);
+                auto it = rectListShaders.find(hash);
+                if (it != rectListShaders.end())
+                    return it->second.valid ? &it->second : nullptr;
+                Shader& entry = rectListShaders[hash];
+                const std::string source = xenos::WrapRectListVertexShader(base.info.hlsl);
+                if (source.empty())
+                {
+                    SHADER_LOG_WARNING("compile-failed", RendererByteFnv, "renderer: vertex shader {:016x} has no rect-list entry point", hash);
+                    return nullptr;
+                }
+                xenos::CompiledShader compiled = xenos::CompileCachedHlsl(source, "main", "vs_6_0", binaryFormat);
+                if (!compiled.ok)
+                {
+                    SHADER_LOG_WARNING("compile-failed", RendererByteFnv, "renderer: rect-list vertex shader {:016x} failed to compile:\n{}", hash, compiled.errors);
+                    return nullptr;
+                }
+                entry.info = base.info;
+                entry.shader = device->createShader(compiled.bytecode.data(), compiled.bytecode.size(), "main", renderFormat);
+                entry.valid = entry.shader != nullptr;
+                return entry.valid ? &entry : nullptr;
+            }
+
             // ---- render targets ------------------------------------------------------
             // EDRAM has no height; take it from the scissor, or assume 16:9 / square
             // when the scissor is the "everything" 8192x8192 used by clears.
@@ -2936,6 +2966,12 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 desc.pixelShader = ps ? ps->shader.get() : nullptr;
                 if (key.prim == 8 && rectListGs)
                     desc.geometryShader = rectListGs.get();
+                if (key.prim == 8 && metal)
+                {
+                    Shader* rectVs = GetRectListShader(*vs, key.vs);
+                    if (!rectVs) return nullptr;
+                    desc.vertexShader = rectVs->shader.get();
+                }
 
                 uint32_t depthControl = key.depthControl;
                 desc.depthEnabled = (depthControl & 2) != 0 && depthFormat != RenderFormat::UNKNOWN;
@@ -3345,6 +3381,14 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 }
                 key.colorMask = colorWrites ? (Reg(REG_RB_COLOR_MASK) & 0xF) : 0;
                 key.prim = info.primitiveType;
+                if (metal && key.prim == 8 && info.indexed)
+                {
+                    // The packed-corner expansion needs consecutive guest vertices.
+                    static bool reported = false;
+                    if (!std::exchange(reported, true))
+                        LOG_WARNING("renderer: Metal indexed rect lists are drawn without expansion (vs={:016x})", vsHash);
+                    key.prim = 4;
+                }
                 key.rtFormat = uint32_t(color->format);
                 key.depthFormat = depth ? uint32_t(depth->format) : 0;
                     pipelineLookupTimer.AddTo(tPipelineLookup);
@@ -3982,6 +4026,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 auto& indices = indexScratch;
                 if (!info.indexed) indices.clear();
                 bool useIndices = false;
+                bool rectListExpanded = false; // indices carry the base vertex
                 RenderFormat indexFormat = RenderFormat::R32_UINT;
                 uint32_t indexCount = info.indexCount;
                 if (info.indexed)
@@ -4008,6 +4053,29 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                     }
                     indices.swap(out);
                     useIndices = true;
+                    break;
+                }
+                case 8: // rect list -> packed corners for the Metal vertex-shader expansion
+                {
+                    if (!metal || info.indexed)
+                        break;
+                    auto& out = primitiveScratch;
+                    out.clear();
+                    const uint32_t rects = info.indexCount / 3;
+                    const int64_t first = int32_t(Reg(REG_VGT_INDX_OFFSET));
+                    if (first < 0 || (first + int64_t(rects) * 3) * 6 > int64_t(UINT32_MAX))
+                    {
+                        drops.index++;
+                        drops.primMask |= 1u << 8;
+                        return;
+                    }
+                    out.reserve(size_t(rects) * 6);
+                    for (uint32_t r = 0; r < rects; r++)
+                        for (uint32_t k = 0; k < 6; k++)
+                            out.push_back(uint32_t((first + int64_t(r) * 3) * 6 + k));
+                    indices.swap(out);
+                    useIndices = true;
+                    rectListExpanded = true;
                     break;
                 }
                 case 5: // triangle fan -> list
@@ -4087,7 +4155,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 commandList->setGraphicsDescriptorSet(set3, 3);
                 if(vulkan) commandList->setGraphicsDescriptorSet(staticSamplerSet.get(),4);
 
-                int32_t baseVertex = int32_t(Reg(REG_VGT_INDX_OFFSET));
+                int32_t baseVertex = rectListExpanded ? 0 : int32_t(Reg(REG_VGT_INDX_OFFSET));
                 static uint32_t drawLogs = 0;
                 if (psTraceRemaining && ps && key.ps == psTraceHash)
                 {
