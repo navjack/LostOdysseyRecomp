@@ -39,6 +39,25 @@ namespace
             size = 0;
         }
     };
+
+    std::atomic<CrashReporter> g_reporters[4]{};
+
+    void RunCrashReporters() noexcept
+    {
+        for (auto& reporter : g_reporters)
+            if (const auto report = reporter.load(std::memory_order_acquire))
+                report();
+    }
+}
+
+void RegisterCrashReporter(CrashReporter reporter) noexcept
+{
+    for (auto& slot : g_reporters)
+    {
+        CrashReporter empty = nullptr;
+        if (slot.compare_exchange_strong(empty, reporter, std::memory_order_acq_rel))
+            return;
+    }
 }
 
 #ifdef _WIN32
@@ -338,6 +357,7 @@ namespace
             __try
             {
                 WriteGuestDumps(guest);
+                RunCrashReporters();
                 WriteHostStack(*info->ContextRecord);
             }
             __except (EXCEPTION_EXECUTE_HANDLER)
@@ -433,11 +453,23 @@ namespace
         }
         if (const auto* guest = GetPPCContext())
         {
-            text.Text("[crash] guest lr=0x").Hex(guest->lr).Text(" ctr=0x").Hex(guest->ctr.u32)
-                .Text(" r1=0x").Hex(guest->r1.u32).Text(" r3=0x").Hex(guest->r3.u32)
-                .Text(" r13=0x").Hex(guest->r13.u32).Text("\n");
+            // The recompiled code may still hold newer values in host registers; these are the
+            // last values it stored, which is usually enough to identify objects and callers.
+            text.Text("[crash] guest lr=0x").Hex(guest->lr).Text(" ctr=0x").Hex(guest->ctr.u32).Text("\n");
+            const uint32_t gpr[32] = {
+                guest->r0.u32, guest->r1.u32, guest->r2.u32, guest->r3.u32, guest->r4.u32, guest->r5.u32, guest->r6.u32, guest->r7.u32,
+                guest->r8.u32, guest->r9.u32, guest->r10.u32, guest->r11.u32, guest->r12.u32, guest->r13.u32, guest->r14.u32, guest->r15.u32,
+                guest->r16.u32, guest->r17.u32, guest->r18.u32, guest->r19.u32, guest->r20.u32, guest->r21.u32, guest->r22.u32, guest->r23.u32,
+                guest->r24.u32, guest->r25.u32, guest->r26.u32, guest->r27.u32, guest->r28.u32, guest->r29.u32, guest->r30.u32, guest->r31.u32 };
+            for (unsigned i = 0; i < 32; i += 8)
+            {
+                text.Text("[crash] guest r").Decimal(i).Text("-r").Decimal(i + 7).Text(":");
+                for (unsigned j = 0; j < 8; ++j) text.Text(" ").Hex(gpr[i + j]);
+                text.Text("\n");
+            }
         }
         text.Write();
+        RunCrashReporters();
         // Best effort: backtrace() is not strictly async-signal-safe.
         void* frames[64];
         const int count = backtrace(frames, 64);
