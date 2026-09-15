@@ -2,7 +2,7 @@
 // (vs_*.bin / ps_*.bin written by LO_SHADER_DUMP_DIR, big-endian dwords) to
 // HLSL and compiles it with DXC.
 //
-// Usage: LoShaderTool <shader.bin | directory> [--print] [--out <dir>] [--vulkan] [--jobs N]
+// Usage: LoShaderTool <shader.bin | directory> [--print] [--out <dir>] [--vulkan | --metal] [--jobs N]
 
 #include <gpu/shader/xenos_translator.h>
 #include <gpu/shader/dxc_compiler.h>
@@ -19,7 +19,27 @@
 #include <algorithm>
 
 namespace fs = std::filesystem;
-static bool spirv=false;
+static xenos::ShaderBinaryFormat binaryFormat = xenos::ShaderBinaryFormat::Dxil;
+
+static xenos::cache::Format CacheFormat()
+{
+    switch (binaryFormat) {
+    case xenos::ShaderBinaryFormat::Spirv: return xenos::cache::Format::Spirv;
+    case xenos::ShaderBinaryFormat::MetalIR: return xenos::cache::Format::MetalIR;
+    default: return xenos::cache::Format::Dxil;
+    }
+}
+
+// Legacy offline names; Metal Shader Converter output uses the .plir container extension.
+static std::string CacheFileName(bool pixel, uint64_t hash)
+{
+    if (binaryFormat != xenos::ShaderBinaryFormat::MetalIR)
+        return xenos::cache::FileName(pixel, hash, binaryFormat == xenos::ShaderBinaryFormat::Spirv);
+    char name[64];
+    std::snprintf(name, sizeof(name), "%s_%016llx_v%u.plir", pixel ? "ps" : "vs",
+        static_cast<unsigned long long>(hash), xenos::cache::Version);
+    return name;
+}
 
 static uint32_t ByteSwap32(uint32_t v)
 {
@@ -56,12 +76,12 @@ static bool ProcessFile(const fs::path& path, bool print, const fs::path& outDir
     for (uint8_t b : bytes) { hash ^= b; hash *= 0x100000001b3ull; }
     fs::path cachePath;
     if (!cacheDir.empty()) {
-        cachePath = cacheDir / xenos::cache::FileName(isPixel, hash, spirv);
+        cachePath = cacheDir / CacheFileName(isPixel, hash);
         std::error_code ec;
         const auto sourceDir = cacheDir / "source";
         fs::create_directories(sourceDir, ec);
         if (ec) { printf("Cannot create source cache: %s\n", ec.message().c_str()); failures++; return false; }
-        auto sourceName = xenos::cache::FileName(isPixel, hash, spirv);
+        auto sourceName = CacheFileName(isPixel, hash);
         sourceName = sourceName.substr(0, 19) + ".bin";
         const auto sourcePath = sourceDir / sourceName;
         if (!fs::exists(sourcePath)) {
@@ -72,7 +92,7 @@ static bool ProcessFile(const fs::path& path, bool print, const fs::path& outDir
         }
         std::ifstream cached(cachePath, std::ios::binary);
         std::vector<uint8_t> data((std::istreambuf_iterator<char>(cached)), {});
-        if (!print && outDir.empty() && xenos::cache::CompleteBinary(data, spirv)) {
+        if (!print && outDir.empty() && xenos::cache::CompleteBinary(data, CacheFormat())) {
             printf("%s: cached\n", name.c_str());
             return true;
         }
@@ -87,7 +107,7 @@ static bool ProcessFile(const fs::path& path, bool print, const fs::path& outDir
         std::ofstream(outDir / (path.stem().string() + ".hlsl")) << translated.hlsl;
     }
 
-    xenos::CompiledShader compiled = xenos::CompileHlsl(translated.hlsl, "main", isPixel ? "ps_6_0" : "vs_6_0", spirv?xenos::ShaderBinaryFormat::Spirv:xenos::ShaderBinaryFormat::Dxil);
+    xenos::CompiledShader compiled = xenos::CompileHlsl(translated.hlsl, "main", isPixel ? "ps_6_0" : "vs_6_0", binaryFormat);
     printf("%-28s %4zu dwords  %s  bytecode=%zu bytes  vfetch=%016llx tex=%08x%s\n", name.c_str(), dwords.size(),
         compiled.ok ? "OK  " : "FAIL", compiled.bytecode.size(),
         (unsigned long long)translated.vertexFetchSlotMask[0], translated.textureSlotMask,
@@ -124,7 +144,7 @@ int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        printf("Usage: LoShaderTool <shader.bin | directory> [--print] [--out <dir>] [--cache <runtime-cache-dir>] [--vulkan] [--jobs N]\n");
+        printf("Usage: LoShaderTool <shader.bin | directory> [--print] [--out <dir>] [--cache <runtime-cache-dir>] [--vulkan | --metal] [--jobs N]\n");
         return 1;
     }
     bool print = false;
@@ -133,7 +153,8 @@ int main(int argc, char** argv)
     fs::path cacheDir;
     for (int i = 2; i < argc; i++)
     {
-        if (strcmp(argv[i], "--vulkan") == 0) spirv = true;
+        if (strcmp(argv[i], "--vulkan") == 0) binaryFormat = xenos::ShaderBinaryFormat::Spirv;
+        else if (strcmp(argv[i], "--metal") == 0) binaryFormat = xenos::ShaderBinaryFormat::MetalIR;
         else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) jobs = std::clamp(std::stoul(argv[++i]),1ul,64ul);
         else if (strcmp(argv[i], "--print") == 0) print = true;
         else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) outDir = argv[++i];
