@@ -139,6 +139,32 @@ namespace gpu::geometry_prepare
             dst[i] = v;
         }
     }
+    // 16-bit guest indices kept at 16 bits: same conversion as Convert<false, Endian>, truncated to
+    // the width the guest used, so list draws can upload half the bytes straight into the ring.
+    template<unsigned Endian>
+    inline void Convert16(const uint8_t* src, uint16_t* dst, uint32_t count)
+    {
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            uint16_t narrow;
+            std::memcpy(&narrow, src + size_t(i) * 2, 2);
+            uint32_t v = narrow;
+            if constexpr (Endian == 1) v = ((v & 0xFF00FF00u) >> 8) | ((v & 0x00FF00FFu) << 8);
+            if constexpr (Endian == 2) v = (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+            if constexpr (Endian == 3) v = (v >> 16) | (v << 16);
+            dst[i] = uint16_t(v & 0xFFFF);
+        }
+    }
+    inline void ConvertIndices16(const uint8_t* src, uint16_t* dst, uint32_t count, uint32_t endian)
+    {
+        switch (endian & 3)
+        {
+        case 0: return Convert16<0>(src, dst, count);
+        case 1: return Convert16<1>(src, dst, count);
+        case 2: return Convert16<2>(src, dst, count);
+        case 3: return Convert16<3>(src, dst, count);
+        }
+    }
     inline void ConvertIndices(const uint8_t* src, uint32_t* dst, uint32_t count, bool wide, uint32_t endian)
     {
         // Dispatch once, allowing each loop to vectorize without per-index branches.

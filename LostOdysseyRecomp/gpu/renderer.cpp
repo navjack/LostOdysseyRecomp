@@ -947,6 +947,20 @@ namespace gpu::renderer
             {
                 auto& before = uploadedConstants[gpuSlot];
                 uint64_t lastOffset = bank == 0 ? before.vsOffset : bank == 1 ? before.psOffset : before.sharedOffset;
+                if (metal)
+                {
+                    // Unified memory: the last upload of this bank is still intact in the current
+                    // slot's ring (a slot's offsets reset only when it is recycled), so compare against
+                    // it directly instead of refreshing a second copy of every changed 8 KB bank.
+                    if (lastOffset != UINT64_MAX && std::memcmp(uploadMapped + lastOffset, data, size) == 0)
+                        return lastOffset;
+                    const uint64_t offset = Upload(data, size);
+                    auto& after = uploadedConstants[gpuSlot];
+                    if (offset != UINT64_MAX)
+                        (bank == 0 ? after.vsOffset : bank == 1 ? after.psOffset : after.sharedOffset) = offset;
+                    return offset;
+                }
+                // Upload heaps can be slow to read back on discrete GPUs; keep a CPU-side copy there.
                 const void* last = bank == 0 ? static_cast<const void*>(before.vs) :
                     bank == 1 ? static_cast<const void*>(before.ps) : static_cast<const void*>(&before.shared);
                 if (lastOffset != UINT64_MAX && std::memcmp(last, data, size) == 0)
@@ -2516,6 +2530,16 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 tex->guestWidth = pitch;
                 tex->guestHeight = height;
                 tex->resolutionHeight = resolution::TargetHeight(pitch, height, internalSize.height);
+                // Experiment (opt-in): TargetHeight keeps square EDRAM surfaces (shadow maps, luminance
+                // reductions) at native size, but pitch is tile-aligned (80) and the guessed height rounds
+                // to 32, so an 864-high shadow map arrives as 880x864 or 880x896 and is scaled with the
+                // scene. LO_NATIVE_NEAR_SQUARE_TARGETS=1 treats a pitch/height difference <= 32 as square.
+                static const bool nativeNearSquare = [] {
+                    const char* value = getenv("LO_NATIVE_NEAR_SQUARE_TARGETS");
+                    return value && strcmp(value, "1") == 0;
+                }();
+                if (nativeNearSquare && pitch + 32 >= height && height + 32 >= pitch)
+                    tex->resolutionHeight = 720;
                 tex->width = std::max(1u, tex->Scale(pitch));
                 tex->height = std::max(1u, tex->Scale(height));
                 RenderTextureDesc desc = RenderTextureDesc::Texture2D(tex->width, tex->height, 1, tex->format, depth ? RenderTextureFlag::DEPTH_TARGET : RenderTextureFlag::RENDER_TARGET);
@@ -4029,12 +4053,24 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 bool rectListExpanded = false; // indices carry the base vertex
                 RenderFormat indexFormat = RenderFormat::R32_UINT;
                 uint32_t indexCount = info.indexCount;
+                // Metal list draws convert guest indices straight into the upload ring at the guest's
+                // width at upload time: no scratch copy, and half the bytes for 16-bit buffers. Strips
+                // keep 32-bit indices so a 0xFFFF index never becomes a Metal primitive restart, and
+                // rewritten primitives and geometry capture still need the CPU copy.
+                const bool listPrimitive = info.primitiveType == 1 || info.primitiveType == 2 || info.primitiveType == 4;
+                const bool directIndices = metal && info.indexed && listPrimitive && !GetHotCaptureEnvironment().geometryCaptureEnabled;
+                uint32_t directIndexCount = 0;
                 if (info.indexed)
                 {
                     uint32_t count = std::min<uint32_t>(info.indexCount, info.indexBufferWords);
-                    indices.resize(count);
-                    const uint8_t* src = Phys(info.indexBase);
-                    geometry_prepare::ConvertIndices(src, indices.data(), count, info.index32, info.indexEndian);
+                    if (directIndices)
+                        directIndexCount = count;
+                    else
+                    {
+                        indices.resize(count);
+                        const uint8_t* src = Phys(info.indexBase);
+                        geometry_prepare::ConvertIndices(src, indices.data(), count, info.index32, info.indexEndian);
+                    }
                     useIndices = true;
                 }
                 switch (info.primitiveType)
@@ -4097,7 +4133,7 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                     break;
                 }
                 if (useIndices)
-                    indexCount = uint32_t(indices.size());
+                    indexCount = directIndices ? directIndexCount : uint32_t(indices.size());
                 if (indexCount == 0)
                 {
                     drops.index++;
@@ -4282,10 +4318,32 @@ void main(triangle V input[3], inout TriangleStream<V> stream)
                 }
                 if (useIndices)
                 {
-                    uint64_t offset = Upload(indices.data(), indices.size() * 4, 16);
-                    if (offset == UINT64_MAX)
-                        return;
-                    RenderIndexBufferView view(RenderBufferReference(uploadRing, offset), uint32_t(indices.size() * 4), RenderFormat::R32_UINT);
+                    uint64_t offset = UINT64_MAX;
+                    uint32_t indexBytes = 0;
+                    RenderFormat uploadedIndexFormat = RenderFormat::R32_UINT;
+                    if (directIndices)
+                    {
+                        const bool narrow = !info.index32;
+                        indexBytes = indexCount * (narrow ? 2u : 4u);
+                        offset = Upload(nullptr, indexBytes, 16);
+                        if (offset == UINT64_MAX)
+                            return;
+                        // Upload may have switched GPU slots; uploadMapped now maps the ring that owns offset.
+                        const uint8_t* src = Phys(info.indexBase);
+                        if (narrow)
+                            geometry_prepare::ConvertIndices16(src, reinterpret_cast<uint16_t*>(uploadMapped + offset), indexCount, info.indexEndian);
+                        else
+                            geometry_prepare::ConvertIndices(src, reinterpret_cast<uint32_t*>(uploadMapped + offset), indexCount, true, info.indexEndian);
+                        uploadedIndexFormat = narrow ? RenderFormat::R16_UINT : RenderFormat::R32_UINT;
+                    }
+                    else
+                    {
+                        indexBytes = uint32_t(indices.size() * 4);
+                        offset = Upload(indices.data(), indexBytes, 16);
+                        if (offset == UINT64_MAX)
+                            return;
+                    }
+                    RenderIndexBufferView view(RenderBufferReference(uploadRing, offset), indexBytes, uploadedIndexFormat);
                     commandList->setIndexBuffer(&view);
                     commandList->drawIndexedInstanced(indexCount, 1, 0, baseVertex, 0);
                 }
