@@ -245,6 +245,25 @@ namespace gpu::video
             g_presentPending = false;
         }
 
+        // Output sizes in settings are physical pixels (the Windows window owner is per-monitor DPI
+        // aware and tells SDL to keep pixels). SDL on macOS sizes windows in points, so a windowed
+        // 3840x2160 request on a 2x display produced a 7680x4320 drawable. Convert with the window's
+        // measured backing scale (Metal drawable / window size); this needs the Metal view.
+        void SetWindowPixelSize(SDL_Window* window, int width, int height)
+        {
+#ifdef __APPLE__
+            int pointWidth = 0, pointHeight = 0, pixelWidth = 0, pixelHeight = 0;
+            SDL_GetWindowSize(window, &pointWidth, &pointHeight);
+            SDL_Metal_GetDrawableSize(window, &pixelWidth, &pixelHeight);
+            if (pointWidth > 0 && pointHeight > 0 && pixelWidth > pointWidth && pixelHeight > pointHeight)
+            {
+                width = std::max(1, int((int64_t(width) * pointWidth + pixelWidth / 2) / pixelWidth));
+                height = std::max(1, int((int64_t(height) * pointHeight + pixelHeight / 2) / pixelHeight));
+            }
+#endif
+            SDL_SetWindowSize(window, width, height);
+        }
+
         void LogOutputPixels(const char* reason)
         {
 #ifdef _WIN32
@@ -432,6 +451,10 @@ namespace gpu::video
                 DestroyWindowResources();
                 return false;
             }
+            // The window was created with the pixel size read as points; now that the Metal view
+            // reports the backing scale, apply the requested physical size and recenter.
+            SetWindowPixelSize(g_window, int(config.width), int(config.height));
+            SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 #ifdef LO_GPU_PLUME
             g_renderWindow = { static_cast<void*>(info.info.cocoa.window), SDL_Metal_GetLayer(g_metalView) };
 #endif
@@ -704,10 +727,10 @@ namespace gpu::video
             int result=SDL_SetWindowFullscreen(g_window,mode==settings::WindowMode::Borderless?SDL_WINDOW_FULLSCREEN_DESKTOP:(g_vulkan && mode==settings::WindowMode::Exclusive?SDL_WINDOW_FULLSCREEN:0));
             if (result == 0 && mode == settings::WindowMode::Windowed) {
                 if ((!wasWindowed || reapply) && !sizeChanged && state.placement.valid) state.placement.Restore(g_window);
-                else if (sizeChanged) SDL_SetWindowSize(g_window,config.width,config.height);
+                else if (sizeChanged) SetWindowPixelSize(g_window,int(config.width),int(config.height));
             }
             else if (result == 0 && mode == settings::WindowMode::Exclusive)
-                SDL_SetWindowSize(g_window,config.width,config.height);
+                SetWindowPixelSize(g_window,int(config.width),int(config.height));
 #ifdef _WIN32
             if (result == 0 && mode == settings::WindowMode::Borderless && !window_mode::FitBorderless(g_nativeWindow)) result = -1;
 #endif
